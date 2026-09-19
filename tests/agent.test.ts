@@ -126,6 +126,47 @@ describe("Linq tapbacks and bare yes/no (text 'yes' / 'no')", () => {
   });
 });
 
+describe("small talk (greetings / thanks / help)", () => {
+  async function text(message: string): Promise<string> {
+    return handleMessage({ conversationId: CONV, sender: "+15195551234", text: message });
+  }
+
+  it.each(["hello", "Hi!", "hey there", "good morning", "What's up?", "yo"])(
+    "'%s' gets a greeting with examples, without Gemini or Zip",
+    async (message) => {
+      const reply = await text(message);
+      expect(reply).toMatch(/^Hi! I'm your procurement assistant/);
+      expect(reply).toContain("show me my pending purchases");
+      expect(mockParse).not.toHaveBeenCalled();
+      expect(mockPending).not.toHaveBeenCalled();
+    }
+  );
+
+  it("thanks gets a short reply", async () => {
+    await expect(text("thank you!")).resolves.toBe("You're welcome!");
+    expect(mockParse).not.toHaveBeenCalled();
+  });
+
+  it("help lists what the bot can do", async () => {
+    const reply = await text("what can you do?");
+    expect(reply).toMatch(/^Here's what I can do/);
+    expect(reply).toContain('until you reply "yes"');
+  });
+
+  it("a greeting keeps the pending plan and reminds the user", async () => {
+    await say({ intent: "APPROVE", vendor: "Figma" });
+    const reply = await text("hello");
+    expect(reply).toContain("Your earlier plan to approve Figma's $1,200 request is still waiting.");
+    expect(getPendingPlan(CONV)).toBeDefined();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it("a greeting followed by a request still goes to Gemini", async () => {
+    await say({ intent: "GET_PENDING" }, "hi, show me my pending purchases");
+    expect(mockParse).toHaveBeenCalledWith("hi, show me my pending purchases", expect.anything());
+  });
+});
+
 describe("APPROVE / DENY", () => {
   it("initial APPROVE does not execute before confirmation", async () => {
     const reply = await say({ intent: "APPROVE", vendor: "figma" }, "approve the Figma request");
@@ -310,7 +351,7 @@ describe("failures", () => {
 
   it("handleMessage never throws", async () => {
     mockParse.mockRejectedValueOnce(new Error("boom"));
-    await expect(handleMessage({ conversationId: CONV, sender: "x", text: "hi" })).resolves.toBe(
+    await expect(handleMessage({ conversationId: CONV, sender: "x", text: "show me pending" })).resolves.toBe(
       "Sorry, something went wrong on my end. Please try again."
     );
   });

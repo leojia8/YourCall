@@ -31,6 +31,15 @@ import * as zip from "./zip.client";
 
 const HELP_TEXT =
   "I didn't quite understand that. You can ask me to show pending requests, review purchases under a limit, investigate a vendor, or act on a specific request.";
+const EXAMPLES = [
+  '• "show me my pending purchases"',
+  '• "handle everything under 5k from existing vendors, but don\'t touch AI"',
+  '• "why did you flag OpenAI?"',
+  '• "approve the Figma request"',
+].join("\n");
+const GREETING_TEXT = `Hi! I'm your procurement assistant. I can review and act on purchase requests for you. Try:\n${EXAMPLES}`;
+const HELP_EXAMPLES_TEXT = `Here's what I can do. Try:\n${EXAMPLES}\n\nI never approve or deny anything until you reply "yes".`;
+const THANKS_TEXT = "You're welcome!";
 const ZIP_READ_FAILED =
   "I couldn't load your purchase requests from Zip right now, so I didn't change anything. Please try again in a moment.";
 const INTERNAL_ERROR = "Sorry, something went wrong on my end. Please try again.";
@@ -45,6 +54,23 @@ const TAPBACK_INTENTS = new Map<string, "CONFIRM" | "CANCEL">([
   ["yes", "CONFIRM"],
   ["no", "CANCEL"],
 ]);
+
+// Small talk the shared IntentType can't express (there is no GREETING intent). Only a whole
+// message that is just a greeting/thanks/help matches, so "hi, show me pending" still goes to
+// Gemini. Answered locally: no Zip read, no Gemini call, pending plan untouched.
+const SMALL_TALK: Array<{ pattern: RegExp; reply: string }> = [
+  {
+    pattern: /^(hi|hello|hey|heya|hiya|yo|sup|howdy|good (morning|afternoon|evening)|what'?s up|whats up)( there)?$/,
+    reply: GREETING_TEXT,
+  },
+  { pattern: /^(thanks|thank you|thank u|thx|ty|cheers|appreciate it)( so much)?$/, reply: THANKS_TEXT },
+  { pattern: /^(help|what can you do|how does this work|commands|\?)$/, reply: HELP_EXAMPLES_TEXT },
+];
+
+function smallTalkReply(text: string): string | undefined {
+  const normalized = text.trim().toLowerCase().replace(/[!.?,\s]+$/g, "").replace(/\s+/g, " ");
+  return SMALL_TALK.find(({ pattern }) => pattern.test(normalized === "" ? "?" : normalized))?.reply;
+}
 
 const VERBS: Record<ActionType, { base: string; past: string }> = {
   APPROVE: { base: "approve", past: "approved" },
@@ -70,6 +96,9 @@ async function route({ conversationId, text }: IncomingMessage): Promise<string>
   const tapback = TAPBACK_INTENTS.get(text.trim().toLowerCase());
   if (tapback === "CONFIRM") return handleConfirm(conversationId);
   if (tapback === "CANCEL") return handleCancel(conversationId);
+
+  const smallTalk = smallTalkReply(text);
+  if (smallTalk) return withPendingNote(conversationId, smallTalk);
 
   // Read-only fetch up front so Gemini can be told the real vendor/category names.
   const prefetched = await tryGetPending();

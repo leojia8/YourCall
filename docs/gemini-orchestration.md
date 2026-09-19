@@ -15,7 +15,7 @@ Status as of 2026-09-19. Owner: Person 3.
 ```bash
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run (220 tests: 101 ours + 119 Linq)
+npm test            # vitest run (230 tests: 111 ours + 119 Linq)
 ```
 
 ### Settings (`.env`)
@@ -23,7 +23,7 @@ npm test            # vitest run (220 tests: 101 ours + 119 Linq)
 | Setting | Effect |
 |---|---|
 | `GEMINI_MODE=mock` | Offline keyword parser (`src/gemini/intent.mock.ts`). **Zero API calls.** Use this for everyday testing. |
-| `GEMINI_MODE=live` | Real Gemini via `GEMINI_API_KEY`. One API call per message, except a bare "yes"/"no" (typed or tapback), which costs none. |
+| `GEMINI_MODE=live` | Real Gemini via `GEMINI_API_KEY`. One API call per message, except a bare "yes"/"no" (typed or tapback) and greetings, thanks or "help", which cost none. |
 | `GEMINI_MODEL=` | Optional. Default: **`gemini-2.5-flash`**, the fastest and most reliable in live tests (see §6 *Model choice*). |
 | `GEMINI_FALLBACK=off` | Turns off the live-mode offline fallback (below). On by default. |
 
@@ -118,20 +118,107 @@ The shared types in `src/types/index.ts` are **unchanged**. They were verified i
 
 ## 3. Testing from a phone
 
-You text the Linq number and get the bot's replies in iMessage. What's needed:
+Verified end to end on 2026-09-19, texting from an iPhone in both mock and live mode (§6, test 8).
 
-1. **Use branch `gemini`**, which already contains Linq (§2).
-2. **Fill in `.env`** with Person 1's values: `LINQ_API_KEY`, `LINQ_WEBHOOK_SECRET` and `LINQ_BASE_URL`. `LINQ_FROM_NUMBER` is only needed if the bot sends the first message.
-3. **Start the server:** `npm run dev`. It serves `POST /webhooks/linq` on `PORT` (default 3000).
-4. **Make it reachable from the internet:** open a tunnel (ngrok or cloudflared) to port 3000.
-5. **Point Linq at it:** the Linq webhook subscription must target `https://<tunnel>/webhooks/linq`. Person 1 has likely pointed it at *their* machine, so either run the merged code there or re-point it at yours (see L6).
-6. **Choose the Gemini mode:** set `GEMINI_MODE=live` to test real Gemini, or `mock` to save quota.
+### One-time setup (done for Person 3's own Linq account)
+In `.env`, which is git-ignored:
 
-**What you'll see:**
-- **Fake data:** the 15 mock requests. Approvals only change that in-memory list, not Zip.
-- **Resets on restart:** restarting the server (including `npm run dev` reloading after a file change) wipes all pending plans and resets the mock data.
+| Variable | Where it comes from |
+|---|---|
+| `LINQ_API_KEY` | From your Linq representative |
+| `LINQ_BASE_URL` | `https://api.linqapp.com/api/partner/v3` |
+| `LINQ_FROM_NUMBER` | The number Linq assigned to the account, from `GET /phone_numbers`. **This is the number you text.** |
+| `LINQ_WEBHOOK_SECRET`, `LINQ_WEBHOOK_SUBSCRIPTION_ID` | From `POST /webhook-subscriptions` with events `message.received` and `reaction.added`, filtered to that number. The secret is shown **only once**. |
 
----
+You also need ngrok installed and logged in (`ngrok config add-authtoken <token>`).
+
+### Start a session (three terminals, from the project folder)
+1. **Pick the Gemini mode.** In `.env`: `GEMINI_MODE=mock` (free, offline keyword parser) or `GEMINI_MODE=live` (real Gemini).
+2. **Terminal 1, the server:** `npm run dev`. Wait for `Server listening on port 3000`.
+3. **Terminal 2, the tunnel:** `ngrok http 3000`.
+4. **Terminal 3, switch the webhook on:** `npx tsx scripts/linq-webhook.ts on`.
+   - It finds the ngrok URL by itself and checks the server is reachable through it.
+   - It then points Linq at `<ngrok>/webhooks/linq` and activates the webhook.
+   - It should print `✓ server reachable` and `ON  https://…/webhooks/linq`.
+5. **Text the Linq number from your phone.**
+
+**Switching mode mid-session:** change `GEMINI_MODE` in `.env`, then restart only the server (Ctrl+C, `npm run dev`). ngrok and the webhook can stay on. `npm run dev` does **not** reload by itself when `.env` changes. Restarting also resets the mock data and clears any waiting plan.
+
+### Example texts
+The mock data is the same in both modes, so the expected replies are too. Approvals change the mock data until the server restarts.
+
+**Mock mode** (keyword parser, so wording matters):
+
+| Text | Expected reply |
+|---|---|
+| `hello` | A greeting with example texts (no Gemini call, in either mode) |
+| `show me my pending purchases` | 15 requests, $25,760; OpenAI flagged at $5,560 |
+| `handle everything under 5k from existing vendors but don't touch AI` | 4 routine requests (Figma, Adobe, AWS, Notion) and 7 attention items, then "Want me to approve these 4?" |
+| `why did you flag OpenAI?` | Explains the $5,560 total vs the $5,000 threshold; the waiting plan is kept |
+| `yes` or 👍 on the **latest** reply | 3 approved; Notion fails on purpose ("no longer awaiting approval") |
+| `deny the Datadog request` | "Datadog's request is $7,200. Deny it?" |
+| `no` or 👎 | "Cancelled. I didn't make any changes." |
+| `approve the OpenAI request` | Lists 6 request IDs: "I won't guess which one" |
+| `approve openai_3` | "$940. Approve it?" plus a heads-up about the $5,560 total |
+
+**Live mode** (real Gemini). A minimal quota-saving set of **5 Gemini calls**, worded casually to show understanding the keyword parser can't do:
+
+| Text | Gemini calls |
+|---|---|
+| `what's on my plate right now?` | 1 |
+| `I'm boarding. Handle everything under five grand from vendors we already use, but don't touch AI stuff` | 1 |
+| `yes` | 0 |
+| `hold on, what's the deal with OpenAI?` | 1 |
+| `kill the Datadog one` | 1 |
+| 👎 | 0 |
+| `nah forget it, just show me what's left` | 1 |
+
+**Quota:**
+- **Free, never reach Gemini:** a bare `yes`/`no`, 👍/👎, and greetings, thanks or "help".
+- **Everything else** costs one Gemini call (rarely two, if Google returns 503 and we retry).
+- **If Gemini fails,** the `npm run dev` terminal prints `[intent.parser] Gemini failed (...); using offline parser for this message`. No such line means Gemini answered.
+
+### What happens with texts it can't handle
+Nothing crashes, and nothing is approved or denied without "yes" or 👍.
+
+| Situation | Reply |
+|---|---|
+| Unrelated text ("monkey") | "I didn't quite understand that. You can ask me to…" A waiting plan is kept, and the reply reminds you of it. |
+| `yes` with nothing waiting | "There's nothing waiting for confirmation." |
+| Unknown vendor (`approve Salesforce`) | "I couldn't find a pending request from Salesforce." Then it lists real pending vendors. |
+| No target (`approve`) | "Which request should I approve? Tell me the vendor or request ID." |
+| Made-up ID (`approve req_99`) | "I couldn't find a pending request with ID req_99…" |
+| Nothing qualifies (`handle everything under 100`) | Lists what needs attention; **no plan is set up** |
+| 👍 on an **older** bot message | Ignored by Linq, so no reply (on purpose) |
+| A bare vendor name replying to "Which request…?" | "Didn't understand": follow-up answers aren't supported (G11) |
+| Internal error | "Sorry, something went wrong on my end. Please try again." |
+
+**Mock-mode parser limits** (fine in live mode):
+- Amounts must be digits ("5k" works; "five grand" doesn't).
+- Vendor names must be exact ("datadlg" isn't recognised).
+- Casual wording ("what's on my plate") gets "didn't understand".
+- A short message (≤4 words) starting with "no", "stop" or "don't" is treated as cancel.
+
+### Stop a session, in this order
+1. **Stop Linq sending:** `npx tsx scripts/linq-webhook.ts off` (check with `npx tsx scripts/linq-webhook.ts status`).
+2. **Return to mock:** set `GEMINI_MODE=mock` in `.env`, so the next session doesn't use quota by accident.
+3. **Stop the server:** Ctrl+C in the `npm run dev` terminal.
+4. **Stop the tunnel:** Ctrl+C in the ngrok terminal.
+
+Next time: `npm run dev`, then `ngrok http 3000`, then `npx tsx scripts/linq-webhook.ts on`. A new ngrok URL is picked up automatically.
+
+### Troubleshooting
+| Symptom | Cause / fix |
+|---|---|
+| ngrok shows no `POST /webhooks/linq` | The webhook is off or points at an old URL: run `… linq-webhook.ts on` |
+| ngrok shows `401` | `LINQ_WEBHOOK_SECRET` doesn't match the subscription |
+| `200` but no reply | Look for errors in the `npm run dev` terminal |
+| `linq-webhook.ts on` says "ngrok isn't running" | Start `ngrok http 3000` first |
+
+### Linq API quirks found
+- Updating a subscription uses **PUT**; PATCH returns 405, despite the docs.
+- `is_active:false` is ignored when creating a subscription.
+- Each ngrok restart gives a new URL on the free plan; rerun `on`.
 
 ## 4. What was built
 
@@ -142,6 +229,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 | `src/orchestration/format.ts` | Money formatting, currency-safe totals, name matching |
 | `src/orchestration/mock.zip.ts` | **Temporary** mock Zip: 15 fixture requests plus in-memory execution |
 | `src/orchestration/zip.client.ts` | The single file that picks mock or real Zip |
+| `scripts/linq-webhook.ts` | Switches the Linq webhook `on` / `off` / `status` for phone testing (§3) |
 | `tests/agent.test.ts`, `tests/anomaly.test.ts`, `tests/milestones.test.ts`, `tests/gemini.service.test.ts` | Tests |
 | `docs/gemini-orchestration.md` | This document |
 
@@ -149,7 +237,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 `src/gemini/{gemini.service,gemini.types,intent.parser}.ts`, `src/orchestration/{agent,rules,anomaly,conversation.store,orchestration.types}.ts`, `tests/{intent,rules}.test.ts`
 
 ### Other files touched
-- `.env.example` gained the `GEMINI_MODE`, `GEMINI_MODEL` and `GEMINI_FALLBACK` lines.
+- `.env.example` gained the `GEMINI_MODE`, `GEMINI_MODEL`, `GEMINI_FALLBACK` and `LINQ_WEBHOOK_SUBSCRIPTION_ID` lines.
 - `.env` was created locally and is git-ignored.
 
 ### Files intentionally NOT touched
@@ -184,7 +272,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
   - `findVendorMatches`: exact vendor matching, trimmed and case-insensitive, never fuzzy.
 - `anomaly.ts`: `detectAggregateSpend`, with `AGGREGATE_SPEND_THRESHOLD = 5000` and `AGGREGATE_MIN_REQUESTS = 2`.
 - `conversation.store.ts`: a `Map<string, ConversationState>` plus a request snapshot per plan. `takePendingPlan` reads the plan and clears it in one synchronous step.
-- `agent.ts`: `handleMessage` plus the bare "yes"/"no" shortcut, the per-intent flows and deterministic reply text.
+- `agent.ts`: `handleMessage` plus the bare "yes"/"no" shortcut, small talk (greetings, thanks, help), the per-intent flows and deterministic reply text.
 
 ### Behaviour per message
 
@@ -194,6 +282,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 |---|---|---|---|
 | Bare `yes` (typed, or 👍/❤️) | no | **yes**, runs the pending plan | taken and cleared *before* executing |
 | Bare `no` (typed, or 👎) | no | never | cleared |
+| Greeting / thanks / help (e.g. `hello`, `thank you`, `what can you do?`) | no | never | kept (reply reminds you it's waiting) |
 | GET_PENDING | yes | never | kept (reply reminds you it's waiting) |
 | INVESTIGATE | yes | never | kept |
 | UNKNOWN | yes | never | kept |
@@ -227,6 +316,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 14. **Offline fallback** when Gemini fails in live mode (§1). This is a deviation from the spec, approved.
 15. **Bare "yes"/"no":** these arrive typed or as tapbacks (👍/❤️ means "yes", 👎 means "no"). They mean CONFIRM/CANCEL, skip Gemini, and "no" never denies anything (§2).
 16. **Gemini settings:** default model `gemini-2.5-flash`, 10 s timeout, one retry on 503/429.
+17. **Small talk handled locally:** the shared `IntentType` has no greeting intent, and adding one would need team approval. So a message that is *only* a greeting, thanks or help request gets a fixed friendly reply with example texts, before Gemini is called: free, instant, and no contract change. "hi, show me pending" still goes to Gemini.
 
 ---
 
@@ -273,7 +363,18 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 - **A plus of pinning:** its behaviour won't change under us mid-hackathon. "latest" can.
 - **Risk:** Google eventually retires older models. If 2.5 starts returning 404, set `GEMINI_MODEL` to a newer model; no code change is needed, and the fallback keeps the bot answering meanwhile.
 
-**Not yet tried live:** anything through real Linq (a phone) or real Zip.
+**Test 8: real phone through Linq** (iPhone → Linq → ngrok → server; read back from Linq's message history). Mock mode first, then live mode on `gemini-2.5-flash`.
+- **Mock mode:** pending summary, bulk review, OpenAI explanation, 👍 executing the plan (7 approved; Notion failed on purpose), deny Datadog, then 👎 cancelling. All correct.
+- **Live mode:** about 7 Gemini calls, all understood:
+  - "whats on my plate right now?" gave the pending summary.
+  - "im boarding a plane handle everything under 5 grand but no ai stuff" gave the correct plan: AI excluded, Slack included since "existing vendors" wasn't said.
+  - "whays the deal with openai?" (typo) gave the OpenAI explanation.
+  - "kill the datadog one" gave "Deny it?"
+  - "nah forget it just show me whats left" gave the summary.
+  - Nothing that the offline parser couldn't have handled appeared, so Gemini answered these.
+- **Found:** "hello" got "didn't understand", which led to the small-talk replies (decision 17). A bare "datadog" answering "Which request should I deny?" wasn't understood (G11).
+
+**Not yet tried live:** real Zip.
 
 ---
 
@@ -285,7 +386,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | P1 | `src/orchestration/zip.client.ts` points at `./mock.zip` | When Person 2's service is ready (Z1) |
 | P2 | `src/orchestration/mock.zip.ts`: 15 fake requests. **`req_9` (Notion) always fails on purpose** to demo partial failure. | Delete after P1, or keep only for tests |
 | P3 | `.env` has `GEMINI_MODE=mock` | Switch to `live` for the real demo |
-| P4 | `.env` has no Linq values yet | Before phone testing (§3) |
+| P4 | ~~`.env` has no Linq values yet~~ **Done** for Person 3's own Linq account (§3). | — |
 | P5 | `main` still has Linq's placeholder `agent.ts` ("hello back"). `gemini` has the real one. | Replaced when the `gemini` → `main` PR is merged (L8) |
 
 ### Person 3 (me) before the demo
@@ -301,6 +402,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | G8 | **Offline parser limits** (mock mode and live fallback). It's a keyword parser: "five grand" doesn't parse ("5k" does), and it can miss a condition phrased unusually. That would produce a **broader** bulk plan than intended. The confirmation list, showing vendor, amount and category, is the backstop, and nothing runs without "yes" or 👍. |
 | G9 | Spec required-test #18 ("malformed Gemini output becomes UNKNOWN") now holds only with `GEMINI_FALLBACK=off`. By default, malformed output goes to the offline parser (decision 14). Both behaviours are tested. |
 | G10 | **Model retirement:** `gemini-2.5-flash` is a June 2025 release. If Google retires it, the bot falls back to the offline parser until `GEMINI_MODEL` is changed (§6 *Model choice*). |
+| G11 | **No follow-up answers.** Each message is read on its own, so answering "Which request should I deny?" with just "datadog" gets "didn't understand"; the user must resend "deny datadog". Fixing it would mean remembering the half-finished request per conversation. Not needed for the demo, just phrase requests in full. |
 
 ### To settle with Person 2 (Zip)
 | # | Question | Why it matters |
@@ -339,7 +441,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 
 ---
 
-## 8. Test coverage (101 tests, all passing)
+## 8. Test coverage (111 of ours + 119 Linq = 230, all passing)
 
 **All 21 required cases:**
 1. qualify below the limit
@@ -386,3 +488,4 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
   - Longer messages still go to Gemini.
   - Words like "constructor" aren't mistaken for tapbacks.
   - Spec milestone 2's literal "yes" now skips Gemini.
+- **Small talk:** greetings get examples without Gemini or Zip; thanks and help replies; a greeting keeps the waiting plan; "hi, show me my pending purchases" still goes to Gemini.
