@@ -2,7 +2,12 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import { env } from "../config/env";
 import type { IncomingMessage } from "../types";
-import type { LinqErrorEnvelope, LinqSendMessageRequest } from "./linq.types";
+import type {
+  LinqCreateChatRequest,
+  LinqErrorEnvelope,
+  LinqOutboundPart,
+  LinqSendMessageRequest,
+} from "./linq.types";
 
 // Everything Linq-specific lives in this file and linq.types.ts.
 // Docs: https://docs.linqapp.com/channel/imessage/
@@ -295,8 +300,72 @@ async function toApiError(res: Response): Promise<LinqApiError> {
   );
 }
 
-async function postTextMessage(conversationId: string, text: string): Promise<void> {
-  const body: LinqSendMessageRequest = { message: { parts: [{ type: "text", value: text }] } };
+const MAX_LINK_LENGTH = 2048; // Linq limit for one link part
+
+/** The URL if the line is nothing but one http(s) URL, otherwise undefined. */
+function asLinkLine(line: string): string | undefined {
+  const candidate = line.trim();
+  if (candidate.length > MAX_LINK_LENGTH || !/^https?:\/\/\S+$/i.test(candidate)) return undefined;
+  try {
+    new URL(candidate);
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turns reply text into the messages to send, in order. Linq only shows a
+ * rich preview card for a `link` part that is the ONLY part of its message, so
+ * a line that is just a URL becomes its own link message and the text around
+ * it becomes text messages. URLs inside a sentence stay plain text. Text with
+ * no such line is sent exactly as given.
+ */
+function toParts(text: string): LinqOutboundPart[] {
+  const lines = text.split(/\r?\n/);
+  if (!lines.some((line) => asLinkLine(line) !== undefined)) {
+    return splitText(text).map((value): LinqOutboundPart => ({ type: "text", value }));
+  }
+
+  const parts: LinqOutboundPart[] = [];
+  let pending: string[] = [];
+  const flush = () => {
+    const chunk = pending.join("\n").trim();
+    if (chunk !== "") {
+      for (const value of splitText(chunk)) parts.push({ type: "text", value });
+    }
+    pending = [];
+  };
+  for (const line of lines) {
+    const link = asLinkLine(line);
+    if (link === undefined) {
+      pending.push(line);
+    } else {
+      flush();
+      parts.push({ type: "link", value: link });
+    }
+  }
+  flush();
+  return parts;
+}
+
+async function readJson(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return undefined; // the request itself succeeded; we just can't read the details
+  }
+}
+
+/** Remembers a sent message's id so a reaction to it can be recognised later. */
+function rememberSentMessageId(sentMessage: unknown): void {
+  if (isRecord(sentMessage) && typeof sentMessage.id === "string") {
+    rememberSentMessage(sentMessage.id);
+  }
+}
+
+async function postPart(conversationId: string, part: LinqOutboundPart): Promise<void> {
+  const body: LinqSendMessageRequest = { message: { parts: [part] } };
   const baseUrl = env.LINQ_BASE_URL.replace(/\/+$/, "");
 
   const res = await fetch(`${baseUrl}/chats/${encodeURIComponent(conversationId)}/messages`, {
@@ -308,15 +377,23 @@ async function postTextMessage(conversationId: string, text: string): Promise<vo
   if (!res.ok) {
     throw await toApiError(res);
   }
-  // Remember the id so a reaction to this message can be recognised later.
-  // Sending already worked, so an unreadable body is not an error.
-  try {
-    const sent: unknown = await res.json();
-    if (isRecord(sent) && isRecord(sent.message) && typeof sent.message.id === "string") {
-      rememberSentMessage(sent.message.id);
+  const sent = await readJson(res);
+  if (isRecord(sent)) rememberSentMessageId(sent.message);
+}
+
+/**
+ * Sends each part as its own message, in order. A link Linq refuses to make a
+ * preview for (400/422) is sent as plain text instead, so the URL is never lost.
+ */
+async function sendParts(conversationId: string, parts: LinqOutboundPart[]): Promise<void> {
+  for (const part of parts) {
+    try {
+      await postPart(conversationId, part);
+    } catch (err) {
+      const previewRejected = part.type === "link" && err instanceof LinqApiError && (err.status === 400 || err.status === 422);
+      if (!previewRejected) throw err;
+      await postPart(conversationId, { type: "text", value: part.value });
     }
-  } catch {
-    // Reactions to this message just won't be recognised.
   }
 }
 
@@ -364,6 +441,9 @@ export async function stopTyping(conversationId: string): Promise<void> {
  * call to message the user. Text over Linq's 10,000 character limit is sent as
  * several consecutive messages.
  *
+ * A line that is only a URL (`https://...`) is delivered as a rich link preview
+ * card, in order with the text around it. URLs inside a sentence stay plain text.
+ *
  * Throws LinqConfigError if LINQ_API_KEY is unset, LinqApiError on a non-2xx
  * response. Errors never include the API key.
  */
@@ -375,7 +455,77 @@ export async function sendMessage(conversationId: string, text: string): Promise
     throw new LinqConfigError("LINQ_API_KEY must be set in .env");
   }
 
-  for (const chunk of splitText(text)) {
-    await postTextMessage(conversationId, chunk);
+  await sendParts(conversationId, toParts(text));
+}
+
+// Linq rejects a new chat whose first message has a link (error 1005). This
+// catches the obvious cases early; Linq stays the final judge (it may also
+// object to bare domains like `zip.com/po/1`).
+const URL_IN_TEXT = /https?:\/\/|www\./i;
+
+/**
+ * Messages `to` FIRST (a proactive alert) and returns the conversationId of the
+ * new chat. Use that id with sendMessage() for follow-ups; replies and
+ * reactions from the person arrive through the normal webhook with the same
+ * conversationId, so store it next to whatever the alert was about.
+ *
+ * `text` follows the same rules as sendMessage, with one Linq restriction: the
+ * first message of a new chat cannot contain a link. Lead with plain text and
+ * put links on their own lines after it (they are sent as follow-ups). If such
+ * a follow-up fails after the chat exists, the id is still returned and the
+ * failure is logged.
+ *
+ * `to` is an E.164 phone number (or an iMessage email). Sends from
+ * LINQ_FROM_NUMBER. Never overrides a recipient's opt-out (Linq answers 403).
+ *
+ * Throws LinqConfigError if LINQ_API_KEY or LINQ_FROM_NUMBER is unset,
+ * LinqApiError on a non-2xx response.
+ */
+export async function startConversation(to: string, text: string): Promise<string> {
+  if (to.trim() === "" || text.trim() === "") {
+    throw new Error("startConversation requires a non-empty recipient and text");
   }
+  if (env.LINQ_API_KEY === "") {
+    throw new LinqConfigError("LINQ_API_KEY must be set in .env");
+  }
+  if (env.LINQ_FROM_NUMBER === "") {
+    throw new LinqConfigError("LINQ_FROM_NUMBER must be set in .env to message someone first");
+  }
+
+  const [first, ...followUps] = toParts(text);
+  if (first === undefined || first.type === "link" || URL_IN_TEXT.test(first.value)) {
+    throw new Error(
+      "the first message of a new conversation cannot contain a link: start with plain text and put links on their own lines after it",
+    );
+  }
+
+  const body: LinqCreateChatRequest = { from: env.LINQ_FROM_NUMBER, to: [to], message: { parts: [first] } };
+  const baseUrl = env.LINQ_BASE_URL.replace(/\/+$/, "");
+  const res = await fetch(`${baseUrl}/chats`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.LINQ_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw await toApiError(res);
+  }
+
+  const created = await readJson(res);
+  const chat = isRecord(created) ? created.chat : undefined;
+  if (!isRecord(chat) || typeof chat.id !== "string" || chat.id === "") {
+    throw new LinqApiError("Linq created a chat but returned no chat id", res.status);
+  }
+  const conversationId = chat.id;
+  rememberSentMessageId(chat.message);
+
+  try {
+    await sendParts(conversationId, followUps);
+  } catch (err) {
+    console.warn(
+      `[linq] chat ${conversationId} was created but a follow-up message failed:`,
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    );
+  }
+  return conversationId;
 }
