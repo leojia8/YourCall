@@ -76,7 +76,7 @@ Status as of 2026-09-19. Owner: Person 3.
 ```bash
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run (300 tests: 181 ours + 119 Linq)
+npm test            # vitest run (329 tests: 205 ours + 124 Linq)
 ```
 
 ### Settings (`.env`)
@@ -280,6 +280,34 @@ Next time: `npm run dev`, then `ngrok http 3000`, then `npx tsx scripts/linq-web
 - Updating a subscription uses **PUT**; PATCH returns 405, despite the docs.
 - `is_active:false` is ignored when creating a subscription.
 - Each ngrok restart gives a new URL on the free plan; rerun `on`.
+
+## 3b. Voice memos (branch `voice-input`)
+
+A voice memo sent from iMessage is transcribed and acted on like a typed message.
+
+**Flow:** Linq delivers a media part with `mime_type: audio/*` and a pre-signed URL → our layer downloads the clip → **one Gemini call** returns the transcript *and* the intent → the normal rules, plan and confirmation steps run unchanged. The reply starts with what was heard:
+
+> 🎤 "approve the Figma request"
+>
+> Figma's request is $1,200. Approve it?
+
+**Key points:**
+- **Costs 1 Gemini request**, the same as a typed message. Transcript and intent come back together.
+- **Voice needs Gemini.** The offline keyword parser can't hear, so if Gemini fails, the quota is gone or `GEMINI_MODE=mock`, the reply is: *"I couldn't make out that voice message. Could you send it as text instead?"* Nothing is executed and a waiting plan is left untouched.
+- **Mock mode never spends quota on audio:** it asks for text instead of calling the API.
+- **The transcript is echoed** so a mishearing is visible *before* the user confirms. A misheard clip can still only produce a proposal, never an action.
+- **Other media is still ignored:** photos and files behave exactly as before.
+- **Size limit:** clips over 8 MB are refused without downloading. A voice memo is far smaller.
+
+**Shared contract change:** `IncomingMessage` gained an optional `audio?: { url, mimeType?, sizeBytes? }`. It is optional, so text messages and all existing code are unaffected — but it is a team contract, so tell Person 1 and Person 2 before merging.
+
+**Files:** `src/gemini/voice.parser.ts` (prompt, schema, validation), `src/orchestration/voice.ts` (download + the seam), `src/gemini/intent.schema.ts` (intent rules/validator shared by both parsers), plus small changes in `linq.service.ts`, `gemini.service.ts`, `agent.ts` and `src/types/index.ts`.
+
+**Swapping in a speech-to-text service later:** `src/orchestration/voice.ts` is the seam. Replace the `parseVoiceIntent` call with a provider (Whisper, Deepgram, AssemblyAI…) and feed the transcript to `parseIntent()`. Voice would then survive a Gemini outage, since the offline parser could handle the transcript. Estimated 1–2 hours.
+
+**Not yet tested with real audio:** iMessage voice memos may arrive in a format Gemini rejects (`audio/amr`, `audio/x-caf`). If so, convert with ffmpeg before sending. This needs one live test with a real voice memo.
+
+---
 
 ## 4. What was built
 
@@ -512,7 +540,7 @@ Older names such as `gemini-2.0-flash` and `gemini-2.5-flash-lite` now return 40
 
 ---
 
-## 8. Test coverage (181 of ours + 119 Linq = 300, all passing)
+## 8. Test coverage (205 of ours + 124 Linq = 329, all passing)
 
 **All 21 required cases:**
 1. qualify below the limit

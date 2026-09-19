@@ -95,6 +95,8 @@ linqRouter.post("/webhooks/linq", express.raw({ type: () => true, limit: "1mb" }
     message = normalizeLinqWebhook(JSON.parse(rawBody));
   } catch (err) {
     if (err instanceof IgnoredLinqEventError) {
+      // Logged so an unhandled shape (e.g. an unexpected voice-memo part) is visible.
+      console.info("[linq] ignored event:", err.message);
       res.status(200).json({ ok: true, ignored: true });
     } else if (err instanceof MalformedLinqWebhookError || err instanceof SyntaxError) {
       console.warn("[linq] rejected malformed webhook:", describeError(err));

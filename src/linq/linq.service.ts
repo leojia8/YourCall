@@ -226,6 +226,7 @@ export function buildIncomingMessage(
   conversationId: unknown,
   sender: unknown,
   text: unknown,
+  audio?: IncomingMessage["audio"],
 ): IncomingMessage {
   if (typeof conversationId !== "string" || conversationId.trim() === "") {
     throw new MalformedLinqWebhookError("missing or invalid conversationId");
@@ -233,10 +234,26 @@ export function buildIncomingMessage(
   if (typeof sender !== "string" || sender.trim() === "") {
     throw new MalformedLinqWebhookError("missing or invalid sender");
   }
-  if (typeof text !== "string" || text.trim() === "") {
+  // A voice memo carries no text: orchestration transcribes the audio instead.
+  if (typeof text !== "string" || (text.trim() === "" && !audio)) {
     throw new MalformedLinqWebhookError("missing or empty text");
   }
-  return { conversationId, sender, text };
+  return audio ? { conversationId, sender, text, audio } : { conversationId, sender, text };
+}
+
+/** First audio attachment on the message, if any (voice memos arrive as media parts). */
+function findAudioPart(parts: unknown[]): IncomingMessage["audio"] | undefined {
+  for (const part of parts) {
+    if (!isRecord(part)) continue;
+    const mimeType = typeof part.mime_type === "string" ? part.mime_type : "";
+    if (!mimeType.startsWith("audio/") || typeof part.url !== "string" || part.url === "") continue;
+    return {
+      url: part.url,
+      mimeType,
+      ...(typeof part.size_bytes === "number" ? { sizeBytes: part.size_bytes } : {}),
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -287,11 +304,18 @@ export function normalizeLinqWebhook(payload: unknown): IncomingMessage {
     )
     .map((part) => part.value)
     .join("\n");
-  if (text.trim() === "") {
-    throw new IgnoredLinqEventError("message has no text parts");
+
+  // A voice memo has no text parts; other media-only messages (photos, ...) stay ignored.
+  const audio = text.trim() === "" ? findAudioPart(data.parts) : undefined;
+  if (text.trim() === "" && !audio) {
+    // Logged so an unexpected voice-memo shape is visible instead of silently ignored.
+    const shapes = data.parts
+      .map((part) => (isRecord(part) ? `${String(part.type)}/${String(part.mime_type ?? "?")}` : typeof part))
+      .join(", ");
+    throw new IgnoredLinqEventError(`message has no text parts (parts: ${shapes || "none"})`);
   }
 
-  return buildIncomingMessage(data.chat.id, data.sender_handle.handle, text);
+  return buildIncomingMessage(data.chat.id, data.sender_handle.handle, text, audio);
 }
 
 // ---------------------------------------------------------------------------

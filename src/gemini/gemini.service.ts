@@ -7,25 +7,40 @@ dotenv.config({ quiet: true });
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const REQUEST_TIMEOUT_MS = 10_000;
+const AUDIO_TIMEOUT_MS = 25_000;
 
 // Overloaded (503) or rate-limited (429) responses are usually transient: retry once.
 const RETRYABLE_STATUSES = new Set([429, 503]);
 export const RETRY_DELAY_MS = 1_000;
 
+/** Audio sent inline with the prompt (a voice memo). */
+export interface InlineAudio {
+  /** base64-encoded bytes, without a data: prefix. */
+  base64: string;
+  mimeType: string;
+}
+
 /**
  * Calls Gemini and returns the raw JSON text of the first candidate.
+ * With `audio`, the clip is sent inline alongside the prompt (one request, not two).
  * Retries once on 429/503; throws on any other transport/API failure.
  * Callers must treat the result as untrusted.
  */
 export async function generateJson(
   prompt: string,
-  responseSchema: GeminiSchema
+  responseSchema: GeminiSchema,
+  audio?: InlineAudio
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not set");
   }
   const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const parts = audio
+    ? [{ text: prompt }, { inline_data: { mime_type: audio.mimeType, data: audio.base64 } }]
+    : [{ text: prompt }];
+  // Audio takes longer to process than a short text prompt.
+  const timeoutMs = audio ? AUDIO_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
 
   const send = () =>
     fetch(`${GEMINI_BASE_URL}/${model}:generateContent`, {
@@ -35,14 +50,14 @@ export async function generateJson(
         "x-goog-api-key": apiKey,
       },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        contents: [{ role: "user", parts }],
         generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
           responseSchema,
         },
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
   let response = await send();

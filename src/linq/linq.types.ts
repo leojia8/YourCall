@@ -6,6 +6,11 @@
 export interface LinqMessagePart {
   type: string; // "text" | "media" | "link" | ...
   value?: string; // present on text parts
+  // Present on media parts (voice memos, images, ...). The url is pre-signed.
+  url?: string;
+  mime_type?: string;
+  size_bytes?: number;
+  filename?: string;
 }
 
 /**

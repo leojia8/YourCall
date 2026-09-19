@@ -27,6 +27,7 @@ import {
 } from "./format";
 import type { PendingPlanRecord } from "./orchestration.types";
 import { buildBulkReviewPlan, findVendorMatches } from "./rules";
+import { interpretVoiceMessage } from "./voice";
 import * as zip from "./zip.client";
 
 const HELP_TEXT =
@@ -43,6 +44,8 @@ const THANKS_TEXT = "You're welcome!";
 const ZIP_READ_FAILED =
   "I couldn't load your purchase requests from Zip right now, so I didn't change anything. Please try again in a moment.";
 const INTERNAL_ERROR = "Sorry, something went wrong on my end. Please try again.";
+const VOICE_FAILED =
+  "I couldn't make out that voice message. Could you send it as text instead? For example: \"handle everything under 5k from existing vendors\".";
 const MAX_LIST_LINES = 8;
 
 // Linq (src/linq/linq.service.ts) turns a tapback on one of our messages into plain text:
@@ -75,8 +78,11 @@ const SMALL_TALK: Array<{ pattern: RegExp; reply: string }> = [
 ];
 
 function smallTalkReply(text: string): string | undefined {
-  const normalized = text.trim().toLowerCase().replace(/[!.?,\s]+$/g, "").replace(/\s+/g, " ");
-  return SMALL_TALK.find(({ pattern }) => pattern.test(normalized === "" ? "?" : normalized))?.reply;
+  const trimmed = text.trim().toLowerCase().replace(/\s+/g, " ");
+  if (trimmed === "") return undefined; // e.g. a voice memo, which carries no text
+  // Keep the bare "?" (a help request) after stripping trailing punctuation.
+  const normalized = trimmed.replace(/[!.?,\s]+$/g, "") || trimmed;
+  return SMALL_TALK.find(({ pattern }) => pattern.test(normalized))?.reply;
 }
 
 const VERBS: Record<ActionType, { base: string; past: string }> = {
@@ -99,18 +105,37 @@ export async function handleMessage(message: IncomingMessage): Promise<string> {
   }
 }
 
-async function route({ conversationId, text }: IncomingMessage): Promise<string> {
+async function route({ conversationId, text, audio }: IncomingMessage): Promise<string> {
   const tapback = TAPBACK_INTENTS.get(text.trim().toLowerCase());
   if (tapback === "CONFIRM") return handleConfirm(conversationId);
   if (tapback === "CANCEL") return handleCancel(conversationId);
 
-  const smallTalk = smallTalkReply(text);
-  if (smallTalk) return withPendingNote(conversationId, smallTalk);
+  const hasAudio = audio !== undefined && text.trim() === "";
+  if (!hasAudio) {
+    const smallTalk = smallTalkReply(text);
+    if (smallTalk) return withPendingNote(conversationId, smallTalk);
+  }
 
   // Read-only fetch up front so Gemini can be told the real vendor/category names.
   const prefetched = await tryGetPending();
-  const intent = await parseIntent(text, buildIntentContext(prefetched));
+  const hints = buildIntentContext(prefetched);
 
+  // A voice memo (no text): transcribe and classify in one Gemini call.
+  if (hasAudio) {
+    const heard = await interpretVoiceMessage(audio, hints);
+    if (!heard) return withPendingNote(conversationId, VOICE_FAILED);
+    const reply = await dispatch(conversationId, heard.intent, prefetched);
+    return `🎤 "${heard.transcript}"\n\n${reply}`;
+  }
+
+  return dispatch(conversationId, await parseIntent(text, hints), prefetched);
+}
+
+async function dispatch(
+  conversationId: string,
+  intent: UserIntent,
+  prefetched: PurchaseRequest[] | null
+): Promise<string> {
   switch (intent.intent) {
     case "CONFIRM":
       return handleConfirm(conversationId);

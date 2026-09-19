@@ -2,6 +2,16 @@ export interface IncomingMessage {
   conversationId: string;
   sender: string;
   text: string;
+
+  /**
+   * Set when the user sent a voice memo instead of typing. `text` is then "" and the
+   * orchestration layer transcribes the audio. Optional: text-only messages are unchanged.
+   */
+  audio?: {
+    url: string;
+    mimeType?: string;
+    sizeBytes?: number;
+  };
 }
 
 export interface OutgoingMessage {
