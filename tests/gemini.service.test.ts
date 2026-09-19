@@ -67,3 +67,28 @@ describe("generateJson retry", () => {
     expect((init?.headers as Record<string, string>)["x-goog-api-key"]).toBe("test-key");
   });
 });
+
+describe("daily quota", () => {
+  const dailyQuota = () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          code: 429,
+          details: [{ violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier", quotaValue: "20" }] }],
+        },
+      }),
+      { status: 429 }
+    );
+
+  it("does not retry a daily-quota 429 (a retry would waste another call)", async () => {
+    mockFetch.mockResolvedValue(dailyQuota());
+    await expect(generateJson("prompt", schema)).rejects.toThrow(/PerDay/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retries a plain 429", async () => {
+    mockFetch.mockResolvedValueOnce(status(429)).mockResolvedValueOnce(ok());
+    await expect(run()).resolves.toBe('{"intent":"CONFIRM"}');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+});

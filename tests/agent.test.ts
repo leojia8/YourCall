@@ -356,3 +356,19 @@ describe("failures", () => {
     );
   });
 });
+
+describe("small talk: extra phrasings", () => {
+  async function text(message: string): Promise<string> {
+    return handleMessage({ conversationId: CONV, sender: "+15195551234", text: message });
+  }
+
+  it.each(["perfect thanks", "thanks so much", "cheers"])("'%s' is thanked", async (message) => {
+    await expect(text(message)).resolves.toBe("You're welcome!");
+    expect(mockParse).not.toHaveBeenCalled();
+  });
+
+  it.each(["who are you", "what do you do?", "how do i use this"])("'%s' gets the help reply", async (message) => {
+    await expect(text(message)).resolves.toMatch(/^Here's what I can do/);
+    expect(mockParse).not.toHaveBeenCalled();
+  });
+});

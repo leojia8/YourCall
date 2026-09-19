@@ -74,7 +74,7 @@ npm run dev              # starts the server on PORT (default 3000)
 | `PORT` | Server port (default 3000) |
 | `GEMINI_API_KEY` | Gemini API key |
 | `GEMINI_MODE` | `live` = real Gemini, `mock` = offline keyword parser (no API calls) |
-| `GEMINI_MODEL` | Optional; default `gemini-2.5-flash` |
+| `GEMINI_MODEL` | Optional; default `gemini-3.5-flash-lite` (free tier: 20 requests/day per model) |
 | `GEMINI_FALLBACK` | `on` (default): if Gemini fails, that message uses the offline parser |
 | `LINQ_API_KEY` | Linq API key |
 | `LINQ_BASE_URL` | `https://api.linqapp.com/api/partner/v3` |

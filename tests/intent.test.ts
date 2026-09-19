@@ -194,3 +194,249 @@ describe("GEMINI_MODE=mock (offline placeholder)", () => {
     expect(mockGenerate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("offline parser vocabulary (mock mode / live fallback)", () => {
+  beforeEach(() => {
+    mockGenerate.mockReset();
+    vi.stubEnv("GEMINI_MODE", "mock");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const ctx = {
+    knownVendors: ["Figma", "OpenAI", "Datadog", "Notion"],
+    knownCategories: ["AI", "Design", "Infrastructure"],
+  };
+  const parse = (message: string) => parseIntent(message, ctx);
+
+  it.each([
+    ["kill the Datadog one", { intent: "DENY", vendor: "Datadog" }],
+    ["nuke the datadog request", { intent: "DENY", vendor: "Datadog" }],
+    ["reject Datadog", { intent: "DENY", vendor: "Datadog" }],
+    ["turn down the Datadog request", { intent: "DENY", vendor: "Datadog" }],
+    ["say no to Datadog", { intent: "DENY", vendor: "Datadog" }],
+    ["shoot down datadog", { intent: "DENY", vendor: "Datadog" }],
+  ])("deny: %s", async (message, expected) => {
+    await expect(parse(message)).resolves.toEqual(expected);
+  });
+
+  it.each([
+    ["green light the Figma request", { intent: "APPROVE", vendor: "Figma" }],
+    ["sign off on Figma", { intent: "APPROVE", vendor: "Figma" }],
+    ["authorize figma", { intent: "APPROVE", vendor: "Figma" }],
+    ["push through the figma one", { intent: "APPROVE", vendor: "Figma" }],
+    ["let's pay Notion", { intent: "APPROVE", vendor: "Notion" }],
+  ])("approve: %s", async (message, expected) => {
+    await expect(parse(message)).resolves.toEqual(expected);
+  });
+
+  it.each([
+    ["take care of everything under five grand", { intent: "BULK_REVIEW", maxAmount: 5000 }],
+    ["deal with anything below $2,500", { intent: "BULK_REVIEW", maxAmount: 2500 }],
+    ["knock out everything no more than 750", { intent: "BULK_REVIEW", maxAmount: 750 }],
+    ["clear out anything up to ten thousand", { intent: "BULK_REVIEW", maxAmount: 10000 }],
+    ["approve everything under 4k", { intent: "BULK_REVIEW", maxAmount: 4000 }],
+    [
+      "sort out everything under 5k from vendors we already use",
+      { intent: "BULK_REVIEW", maxAmount: 5000, existingVendorsOnly: true },
+    ],
+    [
+      "triage anything below 3000 from our existing vendors but stay away from AI",
+      { intent: "BULK_REVIEW", maxAmount: 3000, existingVendorsOnly: true, excludedCategories: ["AI"] },
+    ],
+    [
+      "handle everything under 5k, no AI stuff",
+      { intent: "BULK_REVIEW", maxAmount: 5000, excludedCategories: ["AI"] },
+    ],
+    [
+      "process anything cheaper than 1k except design",
+      { intent: "BULK_REVIEW", maxAmount: 1000, excludedCategories: ["Design"] },
+    ],
+  ])("bulk review: %s", async (message, expected) => {
+    await expect(parse(message)).resolves.toEqual(expected);
+  });
+
+  it.each([
+    "what's on my plate?",
+    "anything waiting for me",
+    "catch me up",
+    "show me the backlog",
+    "what's left",
+    "give me a summary",
+    "how's the queue looking",
+  ])("get pending: %s", async (message) => {
+    await expect(parse(message)).resolves.toEqual({ intent: "GET_PENDING" });
+  });
+
+  it.each([
+    "what's the deal with OpenAI?",
+    "tell me about OpenAI",
+    "look into OpenAI",
+    "why is OpenAI flagged",
+    "what happened with openai",
+  ])("investigate: %s", async (message) => {
+    await expect(parse(message)).resolves.toEqual({ intent: "INVESTIGATE", vendor: "OpenAI" });
+  });
+
+  it.each(["send it", "go for it", "sounds good", "lgtm", "perfect", "make it so", "please do"])(
+    "confirm: %s",
+    async (message) => {
+      await expect(parse(message)).resolves.toEqual({ intent: "CONFIRM" });
+    }
+  );
+
+  it.each(["hold off", "scratch that", "forget it", "not now", "abort", "no thanks", "disregard"])(
+    "cancel: %s",
+    async (message) => {
+      await expect(parse(message)).resolves.toEqual({ intent: "CANCEL" });
+    }
+  );
+
+  describe("safety: words that must not misfire", () => {
+    it("'deny everything under 5k' asks which request; it never becomes a bulk approval", async () => {
+      await expect(parse("deny everything under 5k")).resolves.toEqual({ intent: "DENY" });
+    });
+
+    it("a question about a denial is investigated, not acted on", async () => {
+      await expect(parse("why did you deny the Figma request?")).resolves.toEqual({
+        intent: "INVESTIGATE",
+        vendor: "Figma",
+      });
+    });
+
+    it("'don't approve anything' cancels rather than approving", async () => {
+      await expect(parse("don't approve anything")).resolves.toEqual({ intent: "CANCEL" });
+    });
+
+    it("unrelated text is still UNKNOWN", async () => {
+      await expect(parse("what's the weather in Waterloo")).resolves.toEqual({ intent: "UNKNOWN" });
+      await expect(parse("monkey")).resolves.toEqual({ intent: "UNKNOWN" });
+    });
+
+    it("category words are only taken from exclusion phrases", async () => {
+      await expect(parse("handle everything under 5k")).resolves.toEqual({
+        intent: "BULK_REVIEW",
+        maxAmount: 5000,
+      });
+    });
+  });
+});
+
+describe("offline parser: filler, exclusions and command-vs-answer", () => {
+  beforeEach(() => {
+    mockGenerate.mockReset();
+    vi.stubEnv("GEMINI_MODE", "mock");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const ctx = { knownVendors: ["Figma", "OpenAI", "Datadog"], knownCategories: ["AI", "Design"] };
+  const parse = (message: string) => parseIntent(message, ctx);
+
+  it("a message naming a request is a command, never a yes/no about another plan", async () => {
+    await expect(parse("ok approve figma")).resolves.toEqual({ intent: "APPROVE", vendor: "Figma" });
+    await expect(parse("yes approve figma")).resolves.toEqual({ intent: "APPROVE", vendor: "Figma" });
+    await expect(parse("no, deny datadog")).resolves.toEqual({ intent: "DENY", vendor: "Datadog" });
+  });
+
+  it("bare answers still work", async () => {
+    await expect(parse("approve it")).resolves.toEqual({ intent: "CONFIRM" });
+    await expect(parse("yes")).resolves.toEqual({ intent: "CONFIRM" });
+    await expect(parse("no")).resolves.toEqual({ intent: "CANCEL" });
+  });
+
+  it("leading filler words are ignored", async () => {
+    await expect(parse("actually hold on")).resolves.toEqual({ intent: "CANCEL" });
+    await expect(parse("hey can you show me what's pending")).resolves.toEqual({ intent: "GET_PENDING" });
+    await expect(parse("please approve the figma request")).resolves.toEqual({ intent: "APPROVE", vendor: "Figma" });
+    await expect(parse("i want to deny datadog")).resolves.toEqual({ intent: "DENY", vendor: "Datadog" });
+  });
+
+  it("longer cancels are understood", async () => {
+    await expect(parse("never mind ill do it later")).resolves.toEqual({ intent: "CANCEL" });
+  });
+
+  it("exclusions skip filler words before the category", async () => {
+    await expect(parse("clear the queue under 5k but skip anything AI")).resolves.toEqual({
+      intent: "BULK_REVIEW",
+      maxAmount: 5000,
+      excludedCategories: ["AI"],
+    });
+    await expect(parse("handle everything under 5k, no AI stuff")).resolves.toEqual({
+      intent: "BULK_REVIEW",
+      maxAmount: 5000,
+      excludedCategories: ["AI"],
+    });
+  });
+
+  it("'approve all the <vendor> ones' becomes a vendor-scoped review, not a blind confirm", async () => {
+    await expect(parse("approve all the openai ones")).resolves.toEqual({
+      intent: "BULK_REVIEW",
+      vendor: "OpenAI",
+    });
+  });
+
+  it("word amounts are understood", async () => {
+    await expect(parse("take care of anything below two thousand")).resolves.toEqual({
+      intent: "BULK_REVIEW",
+      maxAmount: 2000,
+    });
+  });
+});
+
+describe("offline parser: verb precedence", () => {
+  beforeEach(() => {
+    mockGenerate.mockReset();
+    vi.stubEnv("GEMINI_MODE", "mock");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const ctx = { knownVendors: ["Figma", "Datadog"], knownCategories: ["AI"] };
+
+  it.each([
+    ["clear the queue under 5k", { intent: "BULK_REVIEW", maxAmount: 5000 }],
+    ["clear out anything under 2k", { intent: "BULK_REVIEW", maxAmount: 2000 }],
+    ["sort out the queue", { intent: "BULK_REVIEW" }],
+  ])("'%s' is a bulk review, not an approval", async (message, expected) => {
+    await expect(parseIntent(message, ctx)).resolves.toEqual(expected);
+  });
+
+  it("an approval verb with a vendor is still an approval", async () => {
+    await expect(parseIntent("sign off on figma", ctx)).resolves.toEqual({ intent: "APPROVE", vendor: "Figma" });
+  });
+});
+
+describe("offline parser: a confirmation must carry no details of its own", () => {
+  beforeEach(() => {
+    mockGenerate.mockReset();
+    vi.stubEnv("GEMINI_MODE", "mock");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const ctx = { knownVendors: ["Figma", "Datadog"], knownCategories: ["AI"] };
+
+  it.each(["yes everything under 5k", "sure everything under 5k", "ok handle everything under 4k"])(
+    "'%s' is never treated as a bare yes",
+    async (message) => {
+      const intent = await parseIntent(message, ctx);
+      expect(intent.intent).not.toBe("CONFIRM");
+    }
+  );
+
+  it("plain confirmations still work", async () => {
+    for (const message of ["yes", "yeah", "do it", "send it", "approve it", "sounds good"]) {
+      await expect(parseIntent(message, ctx)).resolves.toEqual({ intent: "CONFIRM" });
+    }
+  });
+
+  it("cancel stays permissive (it only clears a plan, it never writes)", async () => {
+    await expect(parseIntent("cancel everything", ctx)).resolves.toEqual({ intent: "CANCEL" });
+    await expect(parseIntent("nah forget it", ctx)).resolves.toEqual({ intent: "CANCEL" });
+  });
+});

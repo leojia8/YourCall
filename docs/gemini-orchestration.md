@@ -1,5 +1,66 @@
 # Gemini + Orchestration Layer (Person 3)
 
+---
+
+# 🚨 DEMO DAY — READ THIS FIRST
+
+## 1. The one real limit: Gemini free tier = **20 requests per day, per model**
+
+- **Resets at midnight Pacific time** (3:00 AM Eastern). A demo at 8 AM starts with a full 20.
+- **Each message you type costs 1 request.** A normal demo run is 4–6.
+- **These cost NOTHING** (never call Gemini): `yes`, `no`, 👍, 👎, greetings ("hello"), "thanks", "help".
+- **Default model:** `gemini-3.5-flash-lite` (~1 s). Set in `.env` as `GEMINI_MODEL`.
+- **If you run out:** switch `GEMINI_MODEL` to another model (each has its own 20) and restart the server. Good choices: `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite`. Avoid the big "thinking" models (e.g. `gemini-3.5-flash`): they can exceed the 10 s timeout.
+- **Running out is NOT fatal.** The offline keyword parser answers instead, using no quota. Plain wording still works; very casual wording may get "I didn't quite understand that".
+
+## 2. Before you start
+
+1. `git pull` on branch `gemini` (it contains Linq + this layer).
+2. In `.env`: `GEMINI_MODE=live` (or `mock` to use zero quota).
+3. Terminal 1: `npm run dev` → wait for `Server listening on port 3000`.
+4. Terminal 2: `ngrok http 3000`.
+5. Terminal 3: `npx tsx scripts/linq-webhook.ts on` → expect `✓ server reachable` and `ON  https://…`.
+6. Text the Linq number (the one in `.env` as `LINQ_FROM_NUMBER`).
+
+## 3. During the demo — BE CAREFUL OF THESE
+
+| ⚠️ | Why it matters |
+|---|---|
+| **Leave a few seconds between texts** | Fast bursts can trip the rate limit; that message then falls back to keywords |
+| **NEVER save a code file while demoing** | `npm run dev` restarts, which wipes the waiting plan and resets the sample data mid-conversation |
+| **Confirm with 👍 or "yes"** | Free, instant, and it's the moment that proves the human-approval design |
+| **Say the whole request in one message** | The bot doesn't remember its own question: answering "Which request?" with just "datadog" won't work. Send "deny the Datadog request" |
+| **👍 only counts on the bot's latest message** | A 👍 on an older message is ignored by Linq, so nothing happens |
+| **The data is sample data** | Zip isn't connected yet. Notion's approval **always fails on purpose**, which demos partial-failure reporting |
+| **Don't restart ngrok** unless you must | A new URL means rerunning `npx tsx scripts/linq-webhook.ts on` |
+
+## 4. A demo script that works (5 Gemini calls)
+
+1. `what's on my plate right now?` → 15 requests, $25,760, OpenAI flagged.
+2. `I'm boarding. Handle everything under five grand from vendors we already use, but don't touch AI stuff` → 4 routine requests + 7 attention items + "Want me to approve these 4?"
+3. `why did you flag OpenAI?` → six requests totalling $5,560 vs the $5,000 threshold; the plan is kept.
+4. **👍** (free) → "Done — 3 requests were approved… I couldn't approve Notion's $600 request."
+5. `kill the Datadog one` → "Datadog's request is $7,200. Deny it?"
+6. **👎** (free) → "Cancelled. I didn't make any changes."
+
+## 5. If something goes wrong
+
+| Symptom | Do this |
+|---|---|
+| No reply at all | Check ngrok shows `POST /webhooks/linq`. If not: `npx tsx scripts/linq-webhook.ts on` |
+| ngrok shows 401 | `LINQ_WEBHOOK_SECRET` doesn't match the subscription |
+| "I didn't quite understand that" on a normal request | Quota or a hiccup: the terminal shows `Gemini failed …`. Wait ~10 s and resend, or rephrase plainly ("deny the Datadog request") |
+| Terminal says `daily free-tier quota reached` | Switch `GEMINI_MODEL` and restart the server (§1) |
+| Everything looks stuck | Restart the server. It clears waiting plans and resets the sample data — fine *between* runs, never mid-run |
+
+## 6. After the demo
+
+1. `npx tsx scripts/linq-webhook.ts off`
+2. Set `GEMINI_MODE=mock` in `.env`
+3. Ctrl+C the server and ngrok
+
+---
+
 Status as of 2026-09-19. Owner: Person 3.
 - **Branch `gemini` is pushed and contains Linq.** `main` (with Linq, PR #1) was merged into `gemini` in `7b1e166`. The server now runs Linq and this layer together.
 - **`main` itself still has Linq's placeholder `agent.ts`** until a PR from `gemini` to `main` is merged (L8).
@@ -15,7 +76,7 @@ Status as of 2026-09-19. Owner: Person 3.
 ```bash
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run (230 tests: 111 ours + 119 Linq)
+npm test            # vitest run (300 tests: 181 ours + 119 Linq)
 ```
 
 ### Settings (`.env`)
@@ -24,7 +85,7 @@ npm test            # vitest run (230 tests: 111 ours + 119 Linq)
 |---|---|
 | `GEMINI_MODE=mock` | Offline keyword parser (`src/gemini/intent.mock.ts`). **Zero API calls.** Use this for everyday testing. |
 | `GEMINI_MODE=live` | Real Gemini via `GEMINI_API_KEY`. One API call per message, except a bare "yes"/"no" (typed or tapback) and greetings, thanks or "help", which cost none. |
-| `GEMINI_MODEL=` | Optional. Default: **`gemini-2.5-flash`**, the fastest and most reliable in live tests (see §6 *Model choice*). |
+| `GEMINI_MODEL=` | Optional. Default: **`gemini-3.5-flash-lite`** (about 1 s, correct in tests). **The free tier allows only 20 requests per day, per model** — see §6 *Model choice and quota*. |
 | `GEMINI_FALLBACK=off` | Turns off the live-mode offline fallback (below). On by default. |
 
 - **Local `.env`** (git-ignored, confirmed with `git check-ignore`): has the real key, `GEMINI_MODE=mock` and `GEMINI_MODEL=gemini-2.5-flash`. The key appears nowhere else in the repo.
@@ -193,11 +254,11 @@ Nothing crashes, and nothing is approved or denied without "yes" or 👍.
 | A bare vendor name replying to "Which request…?" | "Didn't understand": follow-up answers aren't supported (G11) |
 | Internal error | "Sorry, something went wrong on my end. Please try again." |
 
-**Mock-mode parser limits** (fine in live mode):
-- Amounts must be digits ("5k" works; "five grand" doesn't).
-- Vendor names must be exact ("datadlg" isn't recognised).
-- Casual wording ("what's on my plate") gets "didn't understand".
-- A short message (≤4 words) starting with "no", "stop" or "don't" is treated as cancel.
+**Offline parser scope** (mock mode, and the live fallback). Its vocabulary was widened on 2026-09-19 so a Gemini outage still leaves a usable bot:
+- **Understood:** "kill / nuke / reject / turn down the X one"; "green light / sign off on / authorize X"; "take care of / deal with / knock out / triage / clear out" for bulk review; "what's on my plate", "catch me up", "the rundown", "how many are open" for the summary; "what's the deal with X", "look into X", "tell me about X" for questions; word amounts ("five grand", "two thousand"); leading filler ("hey can you…", "i want to…", "actually…").
+- **Still not understood:** vendor-name typos ("datadlg"), and anything outside those keywords, which gives "I didn't quite understand that" (safe).
+- **Safety rule:** a message naming a vendor or request ID is a command about *that* request, never a yes/no about a different saved plan. "ok approve figma" proposes approving Figma; it can't execute an unrelated waiting plan.
+- **Deny never becomes bulk review:** "deny everything under 5k" asks which request, because a bulk plan proposes *approvals*.
 
 ### Stop a session, in this order
 1. **Stop Linq sending:** `npx tsx scripts/linq-webhook.ts off` (check with `npx tsx scripts/linq-webhook.ts status`).
@@ -316,7 +377,8 @@ Next time: `npm run dev`, then `ngrok http 3000`, then `npx tsx scripts/linq-web
 14. **Offline fallback** when Gemini fails in live mode (§1). This is a deviation from the spec, approved.
 15. **Bare "yes"/"no":** these arrive typed or as tapbacks (👍/❤️ means "yes", 👎 means "no"). They mean CONFIRM/CANCEL, skip Gemini, and "no" never denies anything (§2).
 16. **Gemini settings:** default model `gemini-2.5-flash`, 10 s timeout, one retry on 503/429.
-17. **Small talk handled locally:** the shared `IntentType` has no greeting intent, and adding one would need team approval. So a message that is *only* a greeting, thanks or help request gets a fixed friendly reply with example texts, before Gemini is called: free, instant, and no contract change. "hi, show me pending" still goes to Gemini.
+17. **Offline vocabulary is free to extend:** the fallback runs locally, so more synonyms cost nothing at runtime. Two safety rules hold it in place: deny words never fall through to bulk review (a bulk plan proposes approvals), and a message naming a vendor or request is always a command, never a yes/no.
+18. **Small talk handled locally:** the shared `IntentType` has no greeting intent, and adding one would need team approval. So a message that is *only* a greeting, thanks or help request gets a fixed friendly reply with example texts, before Gemini is called: free, instant, and no contract change. "hi, show me pending" still goes to Gemini.
 
 ---
 
@@ -356,23 +418,31 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 - Bulk review on `gemini-2.5-flash`, GET_PENDING keeping the plan, DENY replacing it, and a typed CANCEL (test 7).
 - **Every intent the bot uses has now worked live at least once.**
 
-### Model choice
-- **What `gemini-flash-latest` is:** an alias that always points at Google's newest Flash model. The API doesn't report which version it resolves to, so the exact version used in tests 1–5 is unknown.
-- **What `gemini-2.5-flash` is:** a pinned, stable release ("001", June 2025).
-- **Why 2.5 is enough:** Gemini's job here is small, turning one short text into 7 fields. All reasoning and approval decisions happen in our rules code. Every output is validated, and nothing happens without a "yes". In our tests it was faster (1.5–1.8 s) and had no failures.
-- **A plus of pinning:** its behaviour won't change under us mid-hackathon. "latest" can.
-- **Risk:** Google eventually retires older models. If 2.5 starts returning 404, set `GEMINI_MODEL` to a newer model; no code change is needed, and the fallback keeps the bot answering meanwhile.
+### Model choice and quota
 
-**Test 8: real phone through Linq** (iPhone → Linq → ngrok → server; read back from Linq's message history). Mock mode first, then live mode on `gemini-2.5-flash`.
-- **Mock mode:** pending summary, bulk review, OpenAI explanation, 👍 executing the plan (7 approved; Notion failed on purpose), deny Datadog, then 👎 cancelling. All correct.
-- **Live mode:** about 7 Gemini calls, all understood:
-  - "whats on my plate right now?" gave the pending summary.
-  - "im boarding a plane handle everything under 5 grand but no ai stuff" gave the correct plan: AI excluded, Slack included since "existing vendors" wasn't said.
-  - "whays the deal with openai?" (typo) gave the OpenAI explanation.
-  - "kill the datadog one" gave "Deny it?"
-  - "nah forget it just show me whats left" gave the summary.
-  - Nothing that the offline parser couldn't have handled appeared, so Gemini answered these.
-- **Found:** "hello" got "didn't understand", which led to the small-talk replies (decision 17). A bare "datadog" answering "Which request should I deny?" wasn't understood (G11).
+**The free tier allows 20 `generateContent` requests per day, per model** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, quotaValue 20), confirmed from Google's own 429 details on 2026-09-19. This is the single most important operational limit.
+
+- **The cap is per model,** so switching `GEMINI_MODEL` gives a fresh 20 for the day.
+- **Nothing breaks when it runs out:** the offline parser answers instead, and the terminal logs `daily free-tier quota reached for this model`. A daily 429 is not retried, since a retry would waste another call.
+- **Free messages:** a bare "yes"/"no", 👍/👎, greetings, thanks and "help" never call Gemini.
+
+**Models measured on the same demo sentence** ("…under five grand from vendors we already use, but don't touch AI stuff"):
+
+| Model | Result | Speed | Notes |
+|---|---|---|---|
+| **`gemini-3.5-flash-lite`** | correct | **~1.0 s** | **Current default.** Quota untouched as of 2026-09-19. |
+| `gemini-2.5-flash` | correct | 1.5–2.8 s | Previous default; **daily quota used up on 2026-09-19 by testing**. |
+| `gemini-3.5-flash` | not returned in time | >10 s timeout | A "thinking" model: too slow for the 10 s limit, so it fell back. |
+| `gemini-flash-latest` | correct | 2.7–11.7 s | Alias for the newest Flash; slower, and overloaded (503) twice. |
+
+Other models the key can use include `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite` and `gemini-2.5-pro`. **If a demo runs out of quota, set `GEMINI_MODEL` to another model and restart the server.** Prefer "lite" models: the bigger ones think longer and risk the 10 s timeout.
+
+Older names such as `gemini-2.0-flash` and `gemini-2.5-flash-lite` now return 404: they have been retired.
+
+**Test 10: full re-verification, 2026-09-19.** 23 scripted conversations in mock mode after the vocabulary expansion, plus targeted live checks.
+- **23/23 mock scenarios correct** after one fix: "clear the queue under 5k" was being read as an approval, because "clear the" appeared in both the approve and bulk-review word lists. Approve is checked first, so bulk review never ran. The overlap is removed and a precedence test now guards it.
+- **Live safety check (the important one):** with a saved plan to deny Datadog, the message "ok approve figma" was answered by Gemini as "Figma's request is $1,200. Approve it?". It did **not** execute the Datadog plan, and nothing was written. Both requests stayed pending.
+- **The daily quota was hit during testing,** which is how the 20/day limit was discovered. Every affected message still got a sensible reply through the offline parser.
 
 **Not yet tried live:** real Zip.
 
@@ -399,10 +469,11 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | G5 | Every message except a bare "yes"/"no" makes one Zip read *before* Gemini, even "never mind" or "yeah do it". This small latency cost buys the name hints. With real Zip, a slow Zip slows every reply. |
 | G6 | Plans never expire, and Zip isn't re-checked right before execution. A stale plan could run on changed data, and Zip would then return failures, which are reported accurately. |
 | G7 | "Approve all the OpenAI ones" can't be expressed: the shared `UserIntent` has no "all" field. Single approve/deny requires exactly one match, and a bulk review of OpenAI is blocked by the vendor-spend flag. |
-| G8 | **Offline parser limits** (mock mode and live fallback). It's a keyword parser: "five grand" doesn't parse ("5k" does), and it can miss a condition phrased unusually. That would produce a **broader** bulk plan than intended. The confirmation list, showing vendor, amount and category, is the backstop, and nothing runs without "yes" or 👍. |
+| G8 | **Offline parser limits** (mock mode and live fallback). Its vocabulary is now wide (§3): casual verbs, word amounts and leading filler all parse. It is still keyword-based, so vendor-name typos and unusual phrasings return UNKNOWN (safe), and a missed condition would produce a **broader** bulk plan than intended. The confirmation list, showing vendor, amount and category, is the backstop, and nothing runs without "yes" or 👍. |
 | G9 | Spec required-test #18 ("malformed Gemini output becomes UNKNOWN") now holds only with `GEMINI_FALLBACK=off`. By default, malformed output goes to the offline parser (decision 14). Both behaviours are tested. |
 | G10 | **Model retirement:** `gemini-2.5-flash` is a June 2025 release. If Google retires it, the bot falls back to the offline parser until `GEMINI_MODEL` is changed (§6 *Model choice*). |
 | G11 | **No follow-up answers.** Each message is read on its own, so answering "Which request should I deny?" with just "datadog" gets "didn't understand"; the user must resend "deny datadog". Fixing it would mean remembering the half-finished request per conversation. Not needed for the demo, just phrase requests in full. |
+| G12 | **Gemini free tier: 20 requests per day, per model** (§6). Testing used up `gemini-2.5-flash` on 2026-09-19; the default is now `gemini-3.5-flash-lite`, which has its own fresh 20. **Before the demo, check how many calls are left**, and know the fallback model to switch to. Running out is not fatal: the offline parser answers instead. |
 
 ### To settle with Person 2 (Zip)
 | # | Question | Why it matters |
@@ -441,7 +512,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 
 ---
 
-## 8. Test coverage (111 of ours + 119 Linq = 230, all passing)
+## 8. Test coverage (181 of ours + 119 Linq = 300, all passing)
 
 **All 21 required cases:**
 1. qualify below the limit
@@ -488,4 +559,5 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
   - Longer messages still go to Gemini.
   - Words like "constructor" aren't mistaken for tapbacks.
   - Spec milestone 2's literal "yes" now skips Gemini.
+- **Offline parser vocabulary:** deny/approve/bulk/summary/question synonyms, word amounts, leading filler, longer cancels, and the safety rules (a named vendor is a command, not a yes/no; "deny everything" never becomes a bulk approval).
 - **Small talk:** greetings get examples without Gemini or Zip; thanks and help replies; a greeting keeps the waiting plan; "hi, show me my pending purchases" still goes to Gemini.

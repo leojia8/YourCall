@@ -63,8 +63,15 @@ const SMALL_TALK: Array<{ pattern: RegExp; reply: string }> = [
     pattern: /^(hi|hello|hey|heya|hiya|yo|sup|howdy|good (morning|afternoon|evening)|what'?s up|whats up)( there)?$/,
     reply: GREETING_TEXT,
   },
-  { pattern: /^(thanks|thank you|thank u|thx|ty|cheers|appreciate it)( so much)?$/, reply: THANKS_TEXT },
-  { pattern: /^(help|what can you do|how does this work|commands|\?)$/, reply: HELP_EXAMPLES_TEXT },
+  {
+    pattern: /^(perfect|great|awesome|nice|cool|sweet|ok|okay)?\s*(thanks|thank you|thank u|thx|ty|cheers|appreciate it)( so much| a lot)?$/,
+    reply: THANKS_TEXT,
+  },
+  {
+    pattern:
+      /^(help|what can you do|what do you do|who are you|what are you|how does this work|how do i use (this|you)|instructions|options|commands|\?)$/,
+    reply: HELP_EXAMPLES_TEXT,
+  },
 ];
 
 function smallTalkReply(text: string): string | undefined {

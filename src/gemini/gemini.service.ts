@@ -5,7 +5,7 @@ import type { GeminiGenerateContentResponse, GeminiSchema } from "./gemini.types
 dotenv.config({ quiet: true });
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 // Overloaded (503) or rate-limited (429) responses are usually transient: retry once.
@@ -46,14 +46,25 @@ export async function generateJson(
     });
 
   let response = await send();
+  let detail = "";
   if (RETRYABLE_STATUSES.has(response.status)) {
-    console.warn(`[gemini] status ${response.status}, retrying once in ${RETRY_DELAY_MS}ms`);
-    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-    response = await send();
+    // Google explains the 429 in the body (per-minute burst vs the daily cap).
+    detail = await response.clone().text().catch(() => "");
+    if (/PerDay/i.test(detail)) {
+      // A daily quota won't clear in a second; retrying would just waste another call.
+      console.warn("[gemini] daily free-tier quota reached for this model");
+    } else {
+      console.warn(`[gemini] status ${response.status}, retrying once in ${RETRY_DELAY_MS}ms`);
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      response = await send();
+      detail = "";
+    }
   }
 
   if (!response.ok) {
-    throw new Error(`Gemini request failed with status ${response.status}`);
+    const body = detail || (await response.text().catch(() => ""));
+    const summary = body.replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new Error(`Gemini request failed with status ${response.status}${summary ? `: ${summary}` : ""}`);
   }
 
   const body = (await response.json()) as GeminiGenerateContentResponse;
