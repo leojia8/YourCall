@@ -38,6 +38,7 @@ async function say(intent: UserIntent, text = "msg"): Promise<string> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockParse.mockReset();
   resetConversations();
   mockPending.mockResolvedValue(PENDING.map((r) => ({ ...r })));
   mockExecute.mockImplementation(async (action) => ({ requestId: action.requestId, action: action.type, success: true }));
@@ -46,7 +47,7 @@ beforeEach(() => {
 
 describe("CONFIRM / CANCEL", () => {
   it("CONFIRM without a pending plan executes nothing", async () => {
-    const reply = await say({ intent: "CONFIRM" }, "yes");
+    const reply = await say({ intent: "CONFIRM" }, "yeah do it");
     expect(reply).toBe("There's nothing waiting for confirmation.");
     expect(mockExecute).not.toHaveBeenCalled();
   });
@@ -60,56 +61,68 @@ describe("CONFIRM / CANCEL", () => {
     expect(getConversation(CONV)).toEqual({ conversationId: CONV, status: "IDLE" });
     expect(mockExecute).not.toHaveBeenCalled();
 
-    await say({ intent: "CONFIRM" }, "yes");
+    await say({ intent: "CONFIRM" }, "yeah do it");
     expect(mockExecute).not.toHaveBeenCalled();
   });
 });
 
-describe("Linq tapbacks (text 'approve' / 'reject')", () => {
+describe("Linq tapbacks and bare yes/no (text 'yes' / 'no')", () => {
   async function tapback(text: string): Promise<string> {
     return handleMessage({ conversationId: CONV, sender: "+15195551234", text });
   }
 
-  it("'approve' confirms the pending plan without calling Gemini", async () => {
+  it("'yes' confirms the pending plan without calling Gemini", async () => {
     await say({ intent: "APPROVE", vendor: "Figma" });
     mockParse.mockClear();
 
-    const reply = await tapback("approve");
+    const reply = await tapback("yes");
     expect(reply).toBe("Done — Figma's $1,200 request was approved.");
     expect(mockExecute).toHaveBeenCalledWith({ type: "APPROVE", requestId: "figma_001" });
     expect(mockParse).not.toHaveBeenCalled();
     expect(getPendingPlan(CONV)).toBeUndefined();
   });
 
-  it("'reject' cancels the pending plan and never writes to Zip", async () => {
+  it("'no' cancels the pending plan and never writes to Zip", async () => {
     await say({ intent: "APPROVE", vendor: "Figma" });
     mockParse.mockClear();
 
-    const reply = await tapback("reject");
+    const reply = await tapback("no");
     expect(reply).toBe("Cancelled. I didn't make any changes.");
     expect(mockExecute).not.toHaveBeenCalled();
     expect(mockParse).not.toHaveBeenCalled();
     expect(getPendingPlan(CONV)).toBeUndefined();
   });
 
-  it("'approve' with nothing pending executes nothing", async () => {
-    const reply = await tapback("approve");
+  it("'yes' with nothing pending executes nothing", async () => {
+    const reply = await tapback("yes");
     expect(reply).toBe("There's nothing waiting for confirmation.");
     expect(mockExecute).not.toHaveBeenCalled();
     expect(mockParse).not.toHaveBeenCalled();
   });
 
-  it("'reject' on a pending DENY cancels it (it does not deny anything)", async () => {
+  it("'no' on a pending DENY cancels it (it does not deny anything)", async () => {
     await say({ intent: "DENY", vendor: "Datadog" });
-    await tapback(" Reject ");
+    await tapback(" No ");
     expect(mockExecute).not.toHaveBeenCalled();
     expect(getPendingPlan(CONV)).toBeUndefined();
   });
 
-  it("longer messages containing 'approve' still go through Gemini", async () => {
-    await say({ intent: "APPROVE", vendor: "Figma" }, "approve the Figma request");
-    expect(mockParse).toHaveBeenCalledWith("approve the Figma request", expect.anything());
+  it("the old 'approve' / 'reject' words are no longer shortcuts (they go to Gemini)", async () => {
+    await say({ intent: "UNKNOWN" }, "approve");
+    await say({ intent: "UNKNOWN" }, "reject");
+    expect(mockParse).toHaveBeenCalledTimes(2);
     expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it("longer messages still go through Gemini", async () => {
+    await say({ intent: "APPROVE", vendor: "Figma" }, "yes approve the Figma request");
+    expect(mockParse).toHaveBeenCalledWith("yes approve the Figma request", expect.anything());
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it("object-prototype words are not treated as tapbacks", async () => {
+    await say({ intent: "UNKNOWN" }, "constructor");
+    expect(mockParse).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -134,14 +147,14 @@ describe("APPROVE / DENY", () => {
 
   it("CONFIRM executes the previously saved ProposedAction exactly once", async () => {
     await say({ intent: "APPROVE", vendor: "Figma" });
-    const reply = await say({ intent: "CONFIRM" }, "yes");
+    const reply = await say({ intent: "CONFIRM" }, "yeah do it");
 
     expect(mockExecute).toHaveBeenCalledTimes(1);
     expect(mockExecute).toHaveBeenCalledWith({ type: "APPROVE", requestId: "figma_001" });
     expect(reply).toBe("Done — Figma's $1,200 request was approved.");
     expect(getConversation(CONV).status).toBe("IDLE");
 
-    await say({ intent: "CONFIRM" }, "yes");
+    await say({ intent: "CONFIRM" }, "yeah do it");
     expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 
@@ -192,7 +205,7 @@ describe("partial failures", () => {
         ? { requestId: action.requestId, action: action.type, success: false, error: "Request is no longer awaiting approval." }
         : { requestId: action.requestId, action: action.type, success: true }
     );
-    const reply = await say({ intent: "CONFIRM" }, "yes");
+    const reply = await say({ intent: "CONFIRM" }, "yeah do it");
     expect(reply).toBe(
       "Done — Figma's $1,200 request was approved.\nI couldn't approve Adobe's $2,300 request: Request is no longer awaiting approval."
     );
@@ -204,7 +217,7 @@ describe("partial failures", () => {
       if (action.requestId === "figma_001") throw new Error("Zip timeout");
       return { requestId: action.requestId, action: action.type, success: true };
     });
-    const reply = await say({ intent: "CONFIRM" }, "yes");
+    const reply = await say({ intent: "CONFIRM" }, "yeah do it");
     expect(reply).toContain("Done — Adobe's $2,300 request was approved.");
     expect(reply).toContain("I couldn't approve Figma's $1,200 request: Zip timeout");
   });

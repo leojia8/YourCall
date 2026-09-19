@@ -1,8 +1,9 @@
 # Gemini + Orchestration Layer (Person 3)
 
 Status as of 2026-09-19. Owner: Person 3.
-- Branch `gemini`: the main work is committed and pushed in `6ceff34`. The Linq tapback handling (§2) and this doc update are **not committed yet**.
-- **Not yet merged with `linq`**, and Person 2's Zip service doesn't exist yet: **all purchase data is mock data** (§6).
+- **Branch `gemini`:** the work is pushed in `6ceff34` and `f7d977a`. The switch of tapback words to "yes"/"no" (§2) and this doc update are **not committed yet**.
+- **Linq is on `main`** (PR #1, `66227e2`), but **`main` is not merged into `gemini` yet** (§2).
+- **Person 2's Zip service doesn't exist yet,** so **all purchase data is mock data** (§3).
 
 > **Gemini interprets. Our code validates and decides. Zip executes.**
 > Nothing is ever written to Zip unless a *later* message confirms a plan that our code built and saved.
@@ -14,7 +15,7 @@ Status as of 2026-09-19. Owner: Person 3.
 ```bash
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run (99 tests)
+npm test            # vitest run (101 tests)
 ```
 
 ### Settings (`.env`)
@@ -22,8 +23,8 @@ npm test            # vitest run (99 tests)
 | Setting | Effect |
 |---|---|
 | `GEMINI_MODE=mock` | Offline keyword parser (`src/gemini/intent.mock.ts`). **Zero API calls.** Use this for everyday testing. |
-| `GEMINI_MODE=live` | Real Gemini via `GEMINI_API_KEY`. One API call per typed message. Tapbacks cost none. |
-| `GEMINI_MODEL=` | Optional. Default: **`gemini-2.5-flash`**, the fastest and most reliable in live tests. |
+| `GEMINI_MODE=live` | Real Gemini via `GEMINI_API_KEY`. One API call per message, except a bare "yes"/"no" (typed or tapback), which costs none. |
+| `GEMINI_MODEL=` | Optional. Default: **`gemini-2.5-flash`**, the fastest and most reliable in live tests (see §6 *Model choice*). |
 | `GEMINI_FALLBACK=off` | Turns off the live-mode offline fallback (below). On by default. |
 
 - **Local `.env`** (git-ignored, confirmed with `git check-ignore`): has the real key, `GEMINI_MODE=mock` and `GEMINI_MODEL=gemini-2.5-flash`. The key appears nowhere else in the repo.
@@ -31,7 +32,7 @@ npm test            # vitest run (99 tests)
 - **Tests never call Gemini,** whatever the mode: every test mocks it or forces the mode explicitly.
 
 ### Automatic fallback in live mode
-With `GEMINI_MODE=live`, every typed message goes to Gemini first. The offline parser is used only when Gemini **fails**, and only for **that one message**:
+With `GEMINI_MODE=live`, every message except a bare "yes"/"no" goes to Gemini first. The offline parser is used only when Gemini **fails**, and only for **that one message**:
 - **Counts as a failure:** 503/429 after the retry, a timeout (10 s), a network error, or broken/invalid output.
 - **Doesn't change the setting:** the next message tries Gemini again.
 - **Gemini's own "unknown" is respected:** if Gemini works and says it doesn't understand, there's no fallback.
@@ -45,7 +46,7 @@ With `GEMINI_MODE=live`, every typed message goes to Gemini first. The offline p
 
 ### Person 1 (Linq)
 
-**The contract.** Linq's code (`src/linq/linq.routes.ts` on branch `origin/linq`) already calls exactly this:
+**The contract.** Linq's code (`src/linq/linq.routes.ts`, now on `main`) already calls exactly this:
 
 ```ts
 import { handleMessage } from "../orchestration/agent";
@@ -58,28 +59,30 @@ const response = await handleMessage(incomingMessage); // IncomingMessage in
 - **Output:** `Promise<string>`. It **never rejects**; internal errors become a friendly reply.
 - **Pending plans are stored per `conversationId`.** Linq uses the Linq chat ID, which stays the same for each chat.
 
-**What the Linq branch already handles** (read on 2026-09-19, commit `96cdf98`):
+**What Linq already handles** (read on 2026-09-19 from `main`, which includes Linq's latest commit `753c1e3`):
 - `conversationId` is the Linq `chat.id`, and `sender` is the sender's phone number or email.
 - The webhook is acknowledged immediately and processed afterwards. Duplicate deliveries are dropped by `webhook-id`.
 - A typing bubble shows while `handleMessage` runs.
 - `src/config/env.ts` loads `.env`.
+- **A 👍 only counts on the bot's latest reply.** Linq ignores a 👍 on an older message, so it can never confirm a plan by accident. A 👎 counts on any bot message, which is safe because it only cancels.
 
-**Tapbacks (added in our layer).** Linq turns a reaction on one of the bot's messages into a plain message:
+**Tapbacks and bare "yes"/"no" (handled in our layer).** Linq turns a reaction on one of the bot's messages into a plain message:
 
 | Tapback | Linq sends text | Our handling |
 |---|---|---|
-| 👍 like / ❤️ love | `approve` | **CONFIRM**: runs the pending plan, or "nothing waiting" if there is none |
-| 👎 dislike | `reject` | **CANCEL**: clears the pending plan. It **never denies** anything, so a tapback can't start a Zip write by itself. |
+| 👍 like / ❤️ love (latest bot reply only) | `yes` | **CONFIRM**: runs the pending plan, or "nothing waiting" if there is none |
+| 👎 dislike (any bot message) | `no` | **CANCEL**: clears the pending plan. It **never denies** anything, so it can't start a Zip write. |
 
-- **Only an exact match counts:** the whole message must be `approve` or `reject` (ignoring case and spaces). This check happens in `agent.ts` **before** Gemini, so it costs no API call.
-- **Longer messages still go to Gemini:** "approve the Figma request" is handled normally.
-- **Typed words count too:** Linq sends tapbacks as plain text, so typing the single word "approve" behaves exactly like a 👍.
+- **Only an exact match counts:** the whole message must be `yes` or `no` (ignoring case and spaces). This check happens in `agent.ts` **before** the Zip read and Gemini, so it costs no API call.
+- **Typing works the same way:** a typed "yes" or "no" behaves exactly like 👍 or 👎.
+- **Everything else goes to Gemini:** "yeah do it", "never mind" and "yes approve the Figma request" are handled normally.
+- **History:** Linq first sent `approve`/`reject`, then switched to `yes`/`no` in `753c1e3`. We now match `yes`/`no` only; a bare "approve" or "reject" is ordinary text for Gemini.
 
-**How to merge with `linq` (not done yet).** Two files conflict:
+**Merging (not done yet).** Linq is already on `main`. Best practice is to **merge `main` into `gemini`**, fix conflicts and errors there, run typecheck and the full test suite (`main` brings Linq's own tests, e.g. `tests/linq.reactions.test.ts`), then open a PR from `gemini` to `main`. Two files will conflict:
 
 | File | Resolution |
 |---|---|
-| `src/orchestration/agent.ts` | Linq's version is a placeholder that replies "hello back", with a note saying "PERSON 3: overwrite this whole file". **Keep ours.** |
+| `src/orchestration/agent.ts` | `main` has Linq's placeholder that replies "hello back", with a note saying "PERSON 3: overwrite this whole file". **Keep ours.** |
 | `.env.example` | Both branches added lines. **Keep both sets.** |
 
 Nothing else overlaps: we never touched `server.ts`, `config/env.ts` or `src/linq/`.
@@ -98,9 +101,9 @@ Where each function is called (all in `src/orchestration/agent.ts`):
 
 | Function | When |
 |---|---|
-| `getPendingRequests()` | Once at the start of every **typed** message (not tapbacks), to give Gemini the real vendor and category names and to reuse the data. Retried once if it fails. |
+| `getPendingRequests()` | Once at the start of every message except a bare "yes"/"no", to give Gemini the real vendor and category names and to reuse the data. Retried once if it fails. |
 | `getRequestById(id)` | Only for INVESTIGATE on a request ID that isn't in the pending list. |
-| `executeAction(action)` | **Only** on CONFIRM (typed "yes" or 👍), for each action in the saved plan, run in parallel with `Promise.allSettled`. A thrown error or rejected call becomes a failed `ActionResult`. |
+| `executeAction(action)` | **Only** on CONFIRM ("yes", 👍 or another confirmation Gemini recognises), for each action in the saved plan, run in parallel with `Promise.allSettled`. A thrown error or rejected call becomes a failed `ActionResult`. |
 
 The shared types in `src/types/index.ts` are **unchanged**. They were verified identical to the agreed contract.
 
@@ -110,7 +113,7 @@ The shared types in `src/types/index.ts` are **unchanged**. They were verified i
 
 You text the Linq number and get the bot's replies in iMessage. What's needed:
 
-1. **Merge `linq`** as described in §2.
+1. **Merge `main` into `gemini`** as described in §2.
 2. **Fill in `.env`** with Person 1's values: `LINQ_API_KEY`, `LINQ_WEBHOOK_SECRET` and `LINQ_BASE_URL`. `LINQ_FROM_NUMBER` is only needed if the bot sends the first message.
 3. **Start the server:** `npm run dev`. It serves `POST /webhooks/linq` on `PORT` (default 3000).
 4. **Make it reachable from the internet:** open a tunnel (ngrok or cloudflared) to port 3000.
@@ -174,7 +177,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
   - `findVendorMatches`: exact vendor matching, trimmed and case-insensitive, never fuzzy.
 - `anomaly.ts`: `detectAggregateSpend`, with `AGGREGATE_SPEND_THRESHOLD = 5000` and `AGGREGATE_MIN_REQUESTS = 2`.
 - `conversation.store.ts`: a `Map<string, ConversationState>` plus a request snapshot per plan. `takePendingPlan` reads the plan and clears it in one synchronous step.
-- `agent.ts`: `handleMessage` plus tapback handling, the per-intent flows and deterministic reply text.
+- `agent.ts`: `handleMessage` plus the bare "yes"/"no" shortcut, the per-intent flows and deterministic reply text.
 
 ### Behaviour per message
 
@@ -182,15 +185,15 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 
 | Message | Reads Zip | Writes Zip | Effect on the pending plan |
 |---|---|---|---|
-| Tapback `approve` (👍/❤️) | no | **yes**, runs the pending plan | taken and cleared *before* executing |
-| Tapback `reject` (👎) | no | never | cleared |
+| Bare `yes` (typed, or 👍/❤️) | no | **yes**, runs the pending plan | taken and cleared *before* executing |
+| Bare `no` (typed, or 👎) | no | never | cleared |
 | GET_PENDING | yes | never | kept (reply reminds you it's waiting) |
 | INVESTIGATE | yes | never | kept |
 | UNKNOWN | yes | never | kept |
 | BULK_REVIEW | yes | never | **replaced only if** the new plan has ≥1 action; otherwise the old one stays |
 | APPROVE / DENY | yes | never | **replaced only if** exactly one request matches |
-| CONFIRM (typed) | yes | **yes, only here and on 👍** | taken and cleared *before* executing |
-| CANCEL (typed) | yes | never | cleared |
+| CONFIRM from Gemini (e.g. "yeah do it") | yes | **yes, only here and on bare "yes"** | taken and cleared *before* executing |
+| CANCEL from Gemini (e.g. "never mind") | yes | never | cleared |
 
 ---
 
@@ -215,7 +218,7 @@ You text the Linq number and get the bot's replies in iMessage. What's needed:
 12. **Plans are cleared after execution,** even on partial failure. ESCALATE is never produced.
 13. **Similar reasons are merged:** identical attention reasons become one line with the request IDs combined.
 14. **Offline fallback** when Gemini fails in live mode (§1). This is a deviation from the spec, approved.
-15. **Tapbacks:** 👍/❤️ means CONFIRM and 👎 means CANCEL. They skip Gemini, and 👎 never denies anything (§2).
+15. **Bare "yes"/"no":** these arrive typed or as tapbacks (👍/❤️ means "yes", 👎 means "no"). They mean CONFIRM/CANCEL, skip Gemini, and "no" never denies anything (§2).
 16. **Gemini settings:** default model `gemini-2.5-flash`, 10 s timeout, one retry on 503/429.
 
 ---
@@ -232,23 +235,38 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | 3 | Same as #2, plus retry once on 503/429 | `{"intent":"BULK_REVIEW","maxAmount":5000}`: no placeholders, but **still missed `existingVendorsOnly` and `excludedCategories`**. The plan would have proposed AcmeAI (new vendor) and Jasper (AI). | 2.8 s |
 | 4 | Every field required + nullable, fixed field order | **Exact match.** The plan approves Figma, Adobe, AWS and Notion, identical to milestone 1. | 2.7 s |
 
-**Tests 5–6:** a three-message conversation through `handleMessage`: *"approve the Figma request"*, then *"why did you flag OpenAI?"*, then *"yes"*.
+**Tests 5–6:** a three-message conversation through `handleMessage`: *"approve the Figma request"*, then *"why did you flag OpenAI?"*, then *"yes"*. (In test 6 the "yes" went through Gemini; a bare "yes" now skips Gemini, §2.)
 
 | # | Setup | Result | Latency |
 |---|---|---|---|
 | 5 | `gemini-flash-latest`, no fallback yet | **Google overloaded**: 503 + timeout on 2 of 3 calls. All failed safely (UNKNOWN, nothing executed); the retry recovered "yes". This led to adding the offline fallback and switching models. | 7–19 s |
 | 6 | **`gemini-2.5-flash`**, fallback enabled | **All 3 answered by Gemini** (no fallback). The approve saved the plan and asked to confirm; the question explained the $5,560 total and kept the plan; "yes" executed it: "Done — Figma's $1,200 request was approved." | 1.5–1.8 s |
 
+**Test 7:** the remaining untested cases, each run once as one conversation on `gemini-2.5-flash`, with the fallback enabled but never used.
+
+| Message | Result | Latency |
+|---|---|---|
+| "handle everything under 5k from existing vendors but don't touch AI" | Correct bulk plan: approve Figma, Adobe, AWS and Notion; 7 attention items. Identical to milestone 1. | 1.9 s |
+| "show me my pending purchases" | Correct summary: 15 requests, $25,760, OpenAI flagged. **The plan was kept** and the reply reminded the user of it. | 1.0 s |
+| "deny the Datadog request" | "Datadog's request is $7,200. Deny it?" The new plan replaced the old one, and nothing executed. | 1.5 s |
+| "never mind" | "Cancelled. I didn't make any changes." The plan was cleared and nothing executed. | 1.4 s |
+
 **Confirmed live:**
 - The key works on both models.
 - A 503 fails safely.
 - The required+nullable schema extracts all three bulk conditions (test 4).
 - The full approve → investigate → confirm flow works (test 6).
+- Bulk review on `gemini-2.5-flash`, GET_PENDING keeping the plan, DENY replacing it, and a typed CANCEL (test 7).
+- **Every intent the bot uses has now worked live at least once.**
 
-**Not yet tried live:**
-- DENY, GET_PENDING and a typed CANCEL.
-- The bulk-review sentence on `gemini-2.5-flash` (test 4 used `gemini-flash-latest`).
-- Anything through real Linq or real Zip.
+### Model choice
+- **What `gemini-flash-latest` is:** an alias that always points at Google's newest Flash model. The API doesn't report which version it resolves to, so the exact version used in tests 1–5 is unknown.
+- **What `gemini-2.5-flash` is:** a pinned, stable release ("001", June 2025).
+- **Why 2.5 is enough:** Gemini's job here is small, turning one short text into 7 fields. All reasoning and approval decisions happen in our rules code. Every output is validated, and nothing happens without a "yes". In our tests it was faster (1.5–1.8 s) and had no failures.
+- **A plus of pinning:** its behaviour won't change under us mid-hackathon. "latest" can.
+- **Risk:** Google eventually retires older models. If 2.5 starts returning 404, set `GEMINI_MODEL` to a newer model; no code change is needed, and the fallback keeps the bot answering meanwhile.
+
+**Not yet tried live:** anything through real Linq (a phone) or real Zip.
 
 ---
 
@@ -261,19 +279,21 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | P2 | `src/orchestration/mock.zip.ts`: 15 fake requests. **`req_9` (Notion) always fails on purpose** to demo partial failure. | Delete after P1, or keep only for tests |
 | P3 | `.env` has `GEMINI_MODE=mock` | Switch to `live` for the real demo |
 | P4 | `.env` has no Linq values yet | Before phone testing (§3) |
+| P5 | `main` still has Linq's placeholder `agent.ts` ("hello back") | Replaced when `gemini` is merged into `main` (L8) |
 
 ### Person 3 (me) before the demo
 | # | Item |
 |---|---|
-| G1 | Try the untested phrasings live once (DENY, GET_PENDING, typed CANCEL, bulk review on `gemini-2.5-flash`). See §6. |
+| G1 | ~~Try the untested phrasings live~~ **Resolved** by live test 7 (§6): every intent has now worked live on `gemini-2.5-flash`. |
 | G2 | **Latency:** `gemini-2.5-flash` took 1.5–1.8 s; `gemini-flash-latest` took 2.7–11.7 s and was overloaded once. Google can still be overloaded during the demo; the fallback covers that, but the reply can then take ~12 s. |
 | G3 | **Rotate the Gemini key** after the hackathon. It was pasted into a chat session. |
 | G4 | **State is in memory only:** a server restart (including `npm run dev` reloading after an edit) wipes pending plans and resets mock data. Don't edit code during a demo conversation. |
-| G5 | Every typed message makes one Zip read *before* Gemini, even "yes" and "cancel". This small latency cost buys the name hints. With real Zip, a slow Zip slows every reply. |
+| G5 | Every message except a bare "yes"/"no" makes one Zip read *before* Gemini, even "never mind" or "yeah do it". This small latency cost buys the name hints. With real Zip, a slow Zip slows every reply. |
 | G6 | Plans never expire, and Zip isn't re-checked right before execution. A stale plan could run on changed data, and Zip would then return failures, which are reported accurately. |
 | G7 | "Approve all the OpenAI ones" can't be expressed: the shared `UserIntent` has no "all" field. Single approve/deny requires exactly one match, and a bulk review of OpenAI is blocked by the vendor-spend flag. |
 | G8 | **Offline parser limits** (mock mode and live fallback). It's a keyword parser: "five grand" doesn't parse ("5k" does), and it can miss a condition phrased unusually. That would produce a **broader** bulk plan than intended. The confirmation list, showing vendor, amount and category, is the backstop, and nothing runs without "yes" or 👍. |
 | G9 | Spec required-test #18 ("malformed Gemini output becomes UNKNOWN") now holds only with `GEMINI_FALLBACK=off`. By default, malformed output goes to the offline parser (decision 14). Both behaviours are tested. |
+| G10 | **Model retirement:** `gemini-2.5-flash` is a June 2025 release. If Google retires it, the bot falls back to the offline parser until `GEMINI_MODEL` is changed (§6 *Model choice*). |
 
 ### To settle with Person 2 (Zip)
 | # | Question | Why it matters |
@@ -299,8 +319,9 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | L4 | **Group chats are unsupported:** there's no per-sender permission check, so anyone in a group chat could confirm or 👍 | Open; fine for a 1:1 demo |
 | L5 | Reply length: bulk-review replies can be ~15 lines | Open: check it looks OK in iMessage |
 | L6 | **Where the webhook points:** only one server receives Linq webhooks. Agree whose machine or tunnel hosts the merged app for phone testing and the demo. | Open |
-| L7 | **A tapback on ANY earlier bot message counts.** Linq checks only that the reaction is on one of *our* messages, not the latest. So a 👍 on an old message confirms whatever plan is pending *now*. Every reply while a plan is waiting says so, which limits confusion. A stricter option is for Linq to forward only reactions on the bot's most recent message. | Open, low risk: decide with Person 1 |
-| L8 | Merge `linq` into our branch (or both into `main`), resolving `agent.ts` (keep ours) and `.env.example` (keep both). See §2. | Open: not done yet |
+| L7 | A 👍 on an old bot message could confirm the plan pending *now* | **Resolved** by Linq `753c1e3`: a 👍 only counts on the bot's latest reply. A 👎 on any bot message still cancels, which is safe. |
+| L8 | Merge `main` (which has Linq) into `gemini`, resolving `agent.ts` (keep ours) and `.env.example` (keep both); run all tests including Linq's; then PR `gemini` to `main`. See §2. | Open: not done yet |
+| L9 | Tapback words: we match Linq's current `yes`/`no`. If Linq changes them again, `TAPBACK_INTENTS` in `agent.ts` must change too. Otherwise tapbacks still work through Gemini, but cost an API call each. | Agreed words: keep in sync |
 
 ### Deferred by the spec (unchanged; revisit only if they become blockers)
 - Time window for vendor-spend detection.
@@ -311,7 +332,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 
 ---
 
-## 8. Test coverage (99 tests, all passing)
+## 8. Test coverage (101 tests, all passing)
 
 **All 21 required cases:**
 1. qualify below the limit
@@ -349,9 +370,12 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 - Gemini retry: one retry on 503/429, no retry otherwise, and the key sent in a header rather than the URL.
 - The required+nullable output shape.
 - The offline fallback: on Gemini error, on malformed output and on an invalid shape; a genuine UNKNOWN is respected; the next message retries Gemini; `GEMINI_FALLBACK=off` restores UNKNOWN.
-- **Tapbacks:**
-  - `approve` confirms without Gemini.
-  - `reject` cancels without Gemini and never writes to Zip.
-  - `approve` with nothing pending does nothing.
-  - `reject` on a pending DENY cancels it rather than denying.
+- **Bare "yes"/"no" (typed or tapback):**
+  - "yes" confirms without Gemini.
+  - "no" cancels without Gemini and never writes to Zip.
+  - "yes" with nothing pending does nothing.
+  - "no" on a pending DENY cancels it rather than denying.
+  - The old `approve`/`reject` words go to Gemini like any text.
   - Longer messages still go to Gemini.
+  - Words like "constructor" aren't mistaken for tapbacks.
+  - Spec milestone 2's literal "yes" now skips Gemini.

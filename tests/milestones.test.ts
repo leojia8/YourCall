@@ -13,6 +13,7 @@ const mockParse = vi.mocked(parseIntent);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockParse.mockReset();
   resetConversations();
   resetMockZip();
 });
@@ -48,8 +49,9 @@ describe("milestone 2: two-message confirmation flow", () => {
     expect(first).toContain("6 routine requests match your instructions");
     expect(getConversation("test_1").status).toBe("AWAITING_CONFIRMATION");
 
-    mockParse.mockResolvedValueOnce({ intent: "CONFIRM" });
+    // A bare "yes" is recognised directly (same path as a 👍 tapback), without Gemini.
     const second = await handleMessage({ conversationId: "test_1", sender: "test", text: "yes" });
+    expect(mockParse).toHaveBeenCalledTimes(1);
     expect(second).toContain("Done — 5 requests were approved");
     expect(second).toContain("I couldn't approve Notion's $600 request: Request is no longer awaiting approval.");
     expect(getConversation("test_1").status).toBe("IDLE");
