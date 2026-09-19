@@ -65,6 +65,54 @@ describe("CONFIRM / CANCEL", () => {
   });
 });
 
+describe("Linq tapbacks (text 'approve' / 'reject')", () => {
+  async function tapback(text: string): Promise<string> {
+    return handleMessage({ conversationId: CONV, sender: "+15195551234", text });
+  }
+
+  it("'approve' confirms the pending plan without calling Gemini", async () => {
+    await say({ intent: "APPROVE", vendor: "Figma" });
+    mockParse.mockClear();
+
+    const reply = await tapback("approve");
+    expect(reply).toBe("Done — Figma's $1,200 request was approved.");
+    expect(mockExecute).toHaveBeenCalledWith({ type: "APPROVE", requestId: "figma_001" });
+    expect(mockParse).not.toHaveBeenCalled();
+    expect(getPendingPlan(CONV)).toBeUndefined();
+  });
+
+  it("'reject' cancels the pending plan and never writes to Zip", async () => {
+    await say({ intent: "APPROVE", vendor: "Figma" });
+    mockParse.mockClear();
+
+    const reply = await tapback("reject");
+    expect(reply).toBe("Cancelled. I didn't make any changes.");
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockParse).not.toHaveBeenCalled();
+    expect(getPendingPlan(CONV)).toBeUndefined();
+  });
+
+  it("'approve' with nothing pending executes nothing", async () => {
+    const reply = await tapback("approve");
+    expect(reply).toBe("There's nothing waiting for confirmation.");
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockParse).not.toHaveBeenCalled();
+  });
+
+  it("'reject' on a pending DENY cancels it (it does not deny anything)", async () => {
+    await say({ intent: "DENY", vendor: "Datadog" });
+    await tapback(" Reject ");
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(getPendingPlan(CONV)).toBeUndefined();
+  });
+
+  it("longer messages containing 'approve' still go through Gemini", async () => {
+    await say({ intent: "APPROVE", vendor: "Figma" }, "approve the Figma request");
+    expect(mockParse).toHaveBeenCalledWith("approve the Figma request", expect.anything());
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+});
+
 describe("APPROVE / DENY", () => {
   it("initial APPROVE does not execute before confirmation", async () => {
     const reply = await say({ intent: "APPROVE", vendor: "figma" }, "approve the Figma request");

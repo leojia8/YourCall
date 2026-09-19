@@ -36,6 +36,15 @@ const ZIP_READ_FAILED =
 const INTERNAL_ERROR = "Sorry, something went wrong on my end. Please try again.";
 const MAX_LIST_LINES = 8;
 
+// Linq (src/linq/linq.service.ts) turns a tapback on one of our messages into plain text:
+// like/love -> "approve", dislike -> "reject". These are answers to our last question, not
+// new commands, so they map straight to CONFIRM / CANCEL without Gemini. 👎 cancels rather
+// than denies, so a tapback can never start a Zip write on its own.
+const TAPBACK_INTENTS: Record<string, "CONFIRM" | "CANCEL"> = {
+  approve: "CONFIRM",
+  reject: "CANCEL",
+};
+
 const VERBS: Record<ActionType, { base: string; past: string }> = {
   APPROVE: { base: "approve", past: "approved" },
   DENY: { base: "deny", past: "denied" },
@@ -57,6 +66,10 @@ export async function handleMessage(message: IncomingMessage): Promise<string> {
 }
 
 async function route({ conversationId, text }: IncomingMessage): Promise<string> {
+  const tapback = TAPBACK_INTENTS[text.trim().toLowerCase()];
+  if (tapback === "CONFIRM") return handleConfirm(conversationId);
+  if (tapback === "CANCEL") return handleCancel(conversationId);
+
   // Read-only fetch up front so Gemini can be told the real vendor/category names.
   const prefetched = await tryGetPending();
   const intent = await parseIntent(text, buildIntentContext(prefetched));
