@@ -9,6 +9,8 @@ import {
   MalformedLinqWebhookError,
   normalizeLinqWebhook,
   sendMessage,
+  startTyping,
+  stopTyping,
   verifyLinqSignature,
 } from "./linq.service";
 
@@ -21,12 +23,24 @@ function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
+/** The typing bubble is cosmetic: a failure is logged and must never affect the reply. */
+async function tryTyping(action: (conversationId: string) => Promise<void>, conversationId: string): Promise<void> {
+  try {
+    await action(conversationId);
+  } catch (err) {
+    console.warn(`[linq] typing indicator failed for ${conversationId}:`, describeError(err));
+  }
+}
+
 /**
  * Runs after we have already acknowledged the webhook. Orchestration (Gemini +
  * Zip) can be slow, and Linq times out after 10s and retries, which could make
  * the assistant act on the same message twice.
  */
 async function processMessage(message: IncomingMessage): Promise<void> {
+  // Show "..." while orchestration works. Not awaited yet, so it costs no time.
+  const typing = tryTyping(startTyping, message.conversationId);
+
   let reply: string;
   try {
     reply = await handleMessage(message);
@@ -36,8 +50,14 @@ async function processMessage(message: IncomingMessage): Promise<void> {
     reply = FALLBACK_REPLY;
   }
 
+  // Let "start" settle first: a late one could land after our reply and leave
+  // the bubble showing. Sending a message clears it, so no "stop" is needed
+  // when we do send.
+  await typing;
+
   if (reply.trim() === "") {
     console.warn(`[linq] handleMessage returned an empty reply for ${message.conversationId}; not sending`);
+    await tryTyping(stopTyping, message.conversationId);
     return;
   }
 
@@ -46,6 +66,7 @@ async function processMessage(message: IncomingMessage): Promise<void> {
     await sendMessage(outgoing.conversationId, outgoing.text);
   } catch (err) {
     console.error(`[linq] sendMessage failed for ${outgoing.conversationId}:`, describeError(err));
+    await tryTyping(stopTyping, outgoing.conversationId);
   }
 }
 
