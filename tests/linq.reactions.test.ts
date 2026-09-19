@@ -58,10 +58,11 @@ afterEach(() => {
 });
 
 describe("reaction.added on a message we sent", () => {
+  // "yes" / "no" are the words orchestration treats as CONFIRM / CANCEL.
   it.each([
-    ["like", "approve"],
-    ["love", "approve"],
-    ["dislike", "reject"],
+    ["like", "yes"],
+    ["love", "yes"],
+    ["dislike", "no"],
   ])("maps %s to the text %s", (reaction_type, text) => {
     expect(normalizeLinqWebhook(reaction({ message_id: ours, reaction_type }))).toEqual({
       conversationId: CHAT_ID,
@@ -131,6 +132,61 @@ describe("sendMessage recording message ids", () => {
 
     await sendAs(id);
 
-    expect(normalizeLinqWebhook(reaction({ message_id: id })).text).toBe("approve");
+    expect(normalizeLinqWebhook(reaction({ message_id: id })).text).toBe("yes");
+  });
+});
+
+/** Linq "answers" each request with the next id in the list. */
+async function sendManyAs(messageIds: string[], text: string): Promise<void> {
+  let next = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(JSON.stringify({ chat_id: CHAT_ID, message: { id: messageIds[next++] } }), { status: 200 })),
+  );
+  await sendMessage(CHAT_ID, text);
+}
+
+describe("a thumbs-up only counts on our latest reply (it can confirm a plan; a thumbs-down is always safe)", () => {
+  it("ignores 👍/❤️ on an older message once a newer reply exists, but 👎 still cancels", async () => {
+    const newer = `${ours}-newer`;
+    await sendAs(newer);
+
+    for (const reaction_type of ["like", "love"]) {
+      expect(() => normalizeLinqWebhook(reaction({ message_id: ours, reaction_type }))).toThrow(IgnoredLinqEventError);
+    }
+    expect(normalizeLinqWebhook(reaction({ message_id: ours, reaction_type: "dislike" })).text).toBe("no");
+    expect(normalizeLinqWebhook(reaction({ message_id: newer, reaction_type: "like" })).text).toBe("yes");
+  });
+
+  it("counts a 👍 on ANY message of the latest reply (text + link card + text)", async () => {
+    const ids = [`${ours}-a`, `${ours}-b`, `${ours}-c`];
+    await sendManyAs(ids, "Approve the Figma request?\nhttps://zip.example/req/1\nReact 👍 to confirm.");
+
+    for (const message_id of ids) {
+      expect(normalizeLinqWebhook(reaction({ message_id })).text).toBe("yes");
+    }
+    // ...and the previous reply (sent in beforeEach) is no longer the latest.
+    expect(() => normalizeLinqWebhook(reaction({ message_id: ours }))).toThrow(IgnoredLinqEventError);
+  });
+
+  it("ignores a 👍 if we sent something in between that we could not track", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not json", { status: 200 })));
+    await sendMessage(CHAT_ID, "a newer message whose id we never learned");
+
+    expect(() => normalizeLinqWebhook(reaction({ message_id: ours }))).toThrow(IgnoredLinqEventError);
+    expect(normalizeLinqWebhook(reaction({ message_id: ours, reaction_type: "dislike" })).text).toBe("no");
+  });
+
+  it("does not let a 👍 in one chat confirm via another chat's message", async () => {
+    expect(() => normalizeLinqWebhook(reaction({ message_id: ours, chat_id: "some-other-chat" }))).toThrow(
+      IgnoredLinqEventError,
+    );
+  });
+
+  it("stops counting a 👍 after 24 hours", () => {
+    expect(normalizeLinqWebhook(reaction({ message_id: ours })).text).toBe("yes");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000 + 1000);
+    expect(() => normalizeLinqWebhook(reaction({ message_id: ours }))).toThrow(IgnoredLinqEventError);
   });
 });

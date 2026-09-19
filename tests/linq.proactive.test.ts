@@ -204,7 +204,7 @@ describe("startConversation (proactive alert)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("makes a 👍 / 👎 on the alert count as approve / reject (the alert is remembered as ours)", async () => {
+  it("makes a 👍 / 👎 on the alert count as yes / no (the alert is remembered as ours)", async () => {
     respond = (call) =>
       call.url.endsWith("/chats")
         ? new Response(JSON.stringify({ chat: { id: NEW_CHAT, message: { id: "alert-msg-1" } } }), { status: 201 })
@@ -223,7 +223,38 @@ describe("startConversation (proactive alert)", () => {
         },
       });
 
-    expect(react("like")).toEqual({ conversationId: NEW_CHAT, sender: "+14155559876", text: "approve" });
-    expect(react("dislike").text).toBe("reject");
+    expect(react("like")).toEqual({ conversationId: NEW_CHAT, sender: "+14155559876", text: "yes" });
+    expect(react("dislike").text).toBe("no");
+  });
+
+  it("counts a 👍 on the alert text and on its link card, but not once a newer message follows", async () => {
+    let next = 0;
+    respond = (call) => {
+      const id = next++ === 0 ? "alert-text" : "alert-link";
+      return call.url.endsWith("/chats")
+        ? new Response(JSON.stringify({ chat: { id: NEW_CHAT, message: { id } } }), { status: 201 })
+        : new Response(JSON.stringify({ chat_id: NEW_CHAT, message: { id } }), { status: 200 });
+    };
+    await startConversation("+14155559876", "PO #1 needs you.\nhttps://zip.example/po/1");
+
+    const react = (message_id: string) =>
+      normalizeLinqWebhook({
+        event_type: "reaction.added",
+        data: {
+          chat_id: NEW_CHAT,
+          message_id,
+          reaction_type: "like",
+          is_from_me: false,
+          from_handle: { handle: "+14155559876", is_me: false },
+        },
+      });
+
+    expect(react("alert-text").text).toBe("yes");
+    expect(react("alert-link").text).toBe("yes");
+
+    respond = () => new Response(JSON.stringify({ chat_id: NEW_CHAT, message: { id: "later" } }), { status: 200 });
+    await sendMessage(NEW_CHAT, "Here is a status update.");
+
+    expect(() => react("alert-text")).toThrow(/latest reply/);
   });
 });

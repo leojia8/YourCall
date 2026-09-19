@@ -130,19 +130,20 @@ export function isDuplicateWebhook(webhookId: string, nowMs: number = Date.now()
 
 // ---------------------------------------------------------------------------
 // Reactions: a tapback on a message WE sent becomes a plain IncomingMessage
-// ("approve" / "reject"), so orchestration needs no new contract.
+// ("yes" / "no"), so orchestration needs no new contract. The words are the ones
+// orchestration already treats as CONFIRM / CANCEL for a saved plan.
 // ---------------------------------------------------------------------------
 
 // Map, not an object: `{}["constructor"]` would be truthy.
 const REACTION_TEXT = new Map([
-  ["like", "approve"],
-  ["love", "approve"],
-  ["dislike", "reject"],
+  ["like", "yes"],
+  ["love", "yes"],
+  ["dislike", "no"],
 ]);
 
 // Only reactions to messages we sent count, otherwise a thumbs-up on any old
-// message (or on the user's own text) would read as an approval. In-memory, so
-// it is empty after a restart; a manager may react hours later, hence 24h.
+// message (or on the user's own text) would read as a confirmation. In-memory,
+// so it is empty after a restart; a manager may react hours later, hence 24h.
 const SENT_MESSAGE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REMEMBERED_MESSAGES = 1000;
 const sentMessageIds = new Map<string, number>();
@@ -161,9 +162,36 @@ function wasSentByUs(id: string, nowMs: number = Date.now()): boolean {
   return sentAt !== undefined && nowMs - sentAt <= SENT_MESSAGE_TTL_MS;
 }
 
+// "yes" can execute a saved plan, so a thumbs-up is a much bigger deal than a
+// thumbs-down. It only counts on the messages of our LATEST send in that chat
+// (one send can be several messages, e.g. text + link card): a casual tap on an
+// old message can never confirm anything. A thumbs-down ("no" = cancel) is safe
+// on any message we sent.
+const latestSendByChat = new Map<string, { ids: Set<string>; at: number }>();
+
+/** Records everything one send put into a chat, replacing the chat's previous latest send. */
+function rememberSend(chatId: string, messageIds: string[], nowMs: number = Date.now()): void {
+  for (const id of messageIds) rememberSentMessage(id, nowMs);
+  // Recorded even when empty: if we sent something we could not track, an older
+  // prompt is no longer the latest, so a thumbs-up on it must not count.
+  latestSendByChat.delete(chatId); // re-insert so Map order stays oldest-first
+  latestSendByChat.set(chatId, { ids: new Set(messageIds), at: nowMs });
+  while (latestSendByChat.size > MAX_REMEMBERED_MESSAGES) {
+    const oldest = latestSendByChat.keys().next().value;
+    if (oldest === undefined) break;
+    latestSendByChat.delete(oldest);
+  }
+}
+
+function isInLatestSend(chatId: string, messageId: string, nowMs: number = Date.now()): boolean {
+  const latest = latestSendByChat.get(chatId);
+  return latest !== undefined && nowMs - latest.at <= SENT_MESSAGE_TTL_MS && latest.ids.has(messageId);
+}
+
 /**
- * reaction.added -> IncomingMessage with text "approve" (like/love) or
- * "reject" (dislike). Field mapping (from Linq's OpenAPI spec):
+ * reaction.added -> IncomingMessage with text "yes" (like/love, only on our
+ * latest reply) or "no" (dislike, on any message we sent). Field mapping (from
+ * Linq's OpenAPI spec):
  *   conversationId <- data.chat_id
  *   sender         <- data.from_handle.handle
  * Everything else (other tapbacks, our own reactions, reactions on messages we
@@ -184,7 +212,11 @@ function normalizeLinqReaction(payload: Record<string, unknown>): IncomingMessag
   if (typeof data.message_id !== "string" || !wasSentByUs(data.message_id)) {
     throw new IgnoredLinqEventError("reaction is not on a message we sent");
   }
-  return buildIncomingMessage(data.chat_id, data.from_handle.handle, decision);
+  const message = buildIncomingMessage(data.chat_id, data.from_handle.handle, decision);
+  if (decision === "yes" && !isInLatestSend(message.conversationId, data.message_id)) {
+    throw new IgnoredLinqEventError("a thumbs-up only counts on our latest reply in the chat");
+  }
+  return message;
 }
 
 /**
@@ -357,14 +389,13 @@ async function readJson(res: Response): Promise<unknown> {
   }
 }
 
-/** Remembers a sent message's id so a reaction to it can be recognised later. */
-function rememberSentMessageId(sentMessage: unknown): void {
-  if (isRecord(sentMessage) && typeof sentMessage.id === "string") {
-    rememberSentMessage(sentMessage.id);
-  }
+/** The id of a sent message from a Linq response, if it has one. */
+function sentMessageId(sentMessage: unknown): string | undefined {
+  return isRecord(sentMessage) && typeof sentMessage.id === "string" ? sentMessage.id : undefined;
 }
 
-async function postPart(conversationId: string, part: LinqOutboundPart): Promise<void> {
+/** Returns the sent message's id (undefined if Linq's success body could not be read). */
+async function postPart(conversationId: string, part: LinqOutboundPart): Promise<string | undefined> {
   const body: LinqSendMessageRequest = { message: { parts: [part] } };
   const baseUrl = env.LINQ_BASE_URL.replace(/\/+$/, "");
 
@@ -378,22 +409,32 @@ async function postPart(conversationId: string, part: LinqOutboundPart): Promise
     throw await toApiError(res);
   }
   const sent = await readJson(res);
-  if (isRecord(sent)) rememberSentMessageId(sent.message);
+  return isRecord(sent) ? sentMessageId(sent.message) : undefined;
 }
 
 /**
  * Sends each part as its own message, in order. A link Linq refuses to make a
  * preview for (400/422) is sent as plain text instead, so the URL is never lost.
+ * Everything sent (plus `alreadySent`, e.g. a new chat's first message) is
+ * recorded as this chat's latest send, even if a later part fails.
  */
-async function sendParts(conversationId: string, parts: LinqOutboundPart[]): Promise<void> {
-  for (const part of parts) {
-    try {
-      await postPart(conversationId, part);
-    } catch (err) {
-      const previewRejected = part.type === "link" && err instanceof LinqApiError && (err.status === 400 || err.status === 422);
-      if (!previewRejected) throw err;
-      await postPart(conversationId, { type: "text", value: part.value });
+async function sendParts(conversationId: string, parts: LinqOutboundPart[], alreadySent: string[] = []): Promise<void> {
+  const sentIds = [...alreadySent];
+  const track = (id: string | undefined) => {
+    if (id !== undefined) sentIds.push(id);
+  };
+  try {
+    for (const part of parts) {
+      try {
+        track(await postPart(conversationId, part));
+      } catch (err) {
+        const previewRejected = part.type === "link" && err instanceof LinqApiError && (err.status === 400 || err.status === 422);
+        if (!previewRejected) throw err;
+        track(await postPart(conversationId, { type: "text", value: part.value }));
+      }
     }
+  } finally {
+    rememberSend(conversationId, sentIds);
   }
 }
 
@@ -517,10 +558,10 @@ export async function startConversation(to: string, text: string): Promise<strin
     throw new LinqApiError("Linq created a chat but returned no chat id", res.status);
   }
   const conversationId = chat.id;
-  rememberSentMessageId(chat.message);
+  const firstId = sentMessageId(chat.message);
 
   try {
-    await sendParts(conversationId, followUps);
+    await sendParts(conversationId, followUps, firstId === undefined ? [] : [firstId]);
   } catch (err) {
     console.warn(
       `[linq] chat ${conversationId} was created but a follow-up message failed:`,
