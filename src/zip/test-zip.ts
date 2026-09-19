@@ -35,6 +35,7 @@ async function main() {
 main().catch(console.error);
 */
 
+/*
 import "dotenv/config";
 import { executeAction } from "./zip.service";
 
@@ -45,6 +46,23 @@ async function main() {
   });
 
   console.log("Action result:");
+  console.log(result);
+}
+
+main().catch(console.error);
+
+*/
+
+import "dotenv/config";
+import { executeAction } from "./zip.service";
+
+async function main() {
+  const result = await executeAction({
+    type: "DENY",
+    requestId: "10cc3574-3442-8780-89a0-1e890a4827d2",
+  });
+
+  console.log("DENY result:");
   console.log(result);
 }
 

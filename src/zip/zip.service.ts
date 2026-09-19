@@ -102,18 +102,59 @@ async function recordAuthorization(
   }
 }
 
+async function rejectRequest(
+  requestId: string
+): Promise<void> {
+  if (!ZIP_API_URL) {
+    throw new Error("ZIP_API_URL is not configured");
+  }
+
+  const response = await fetch(
+    `${ZIP_API_URL}/requests/${requestId}/status`,
+    {
+      method: "PATCH",
+      headers: getHeaders(),
+      body: JSON.stringify({
+        data: {
+          status: "REJECTED",
+          reason: "NOT_ENOUGH_BUDGET",
+          other_reason: "Rejected via YourCall",
+          reason_explanation:
+            "Request rejected through YourCall after user confirmation.",
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Zip API error: ${response.status} ${response.statusText}`
+    );
+  }
+}
+
 export async function executeAction(
   action: ProposedAction
 ): Promise<ActionResult> {
   try {
     if (action.type === "APPROVE") {
-      await recordAuthorization(action.requestId);
+        await recordAuthorization(action.requestId);
 
-      return {
-        requestId: action.requestId,
-        action: action.type,
-        success: true,
-      };
+        return {
+            requestId: action.requestId,
+            action: action.type,
+            success: true,
+        };
+    }
+
+    if (action.type === "DENY") {
+        await rejectRequest(action.requestId);
+
+        return {
+            requestId: action.requestId,
+            action: action.type,
+            success: true,
+        };
     }
 
     return {
