@@ -1,8 +1,8 @@
 # Gemini + Orchestration Layer (Person 3)
 
 Status as of 2026-09-19. Owner: Person 3.
-- **Branch `gemini`:** the work is pushed in `6ceff34` and `f7d977a`. The switch of tapback words to "yes"/"no" (§2) and this doc update are **not committed yet**.
-- **Linq is on `main`** (PR #1, `66227e2`), but **`main` is not merged into `gemini` yet** (§2).
+- **Branch `gemini` is pushed and contains Linq.** `main` (with Linq, PR #1) was merged into `gemini` in `7b1e166`. The server now runs Linq and this layer together.
+- **`main` itself still has Linq's placeholder `agent.ts`** until a PR from `gemini` to `main` is merged (L8).
 - **Person 2's Zip service doesn't exist yet,** so **all purchase data is mock data** (§3).
 
 > **Gemini interprets. Our code validates and decides. Zip executes.**
@@ -15,7 +15,7 @@ Status as of 2026-09-19. Owner: Person 3.
 ```bash
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run (101 tests)
+npm test            # vitest run (220 tests: 101 ours + 119 Linq)
 ```
 
 ### Settings (`.env`)
@@ -78,7 +78,14 @@ const response = await handleMessage(incomingMessage); // IncomingMessage in
 - **Everything else goes to Gemini:** "yeah do it", "never mind" and "yes approve the Figma request" are handled normally.
 - **History:** Linq first sent `approve`/`reject`, then switched to `yes`/`no` in `753c1e3`. We now match `yes`/`no` only; a bare "approve" or "reject" is ordinary text for Gemini.
 
-**Merging (not done yet).** Linq is already on `main`. Best practice is to **merge `main` into `gemini`**, fix conflicts and errors there, run typecheck and the full test suite (`main` brings Linq's own tests, e.g. `tests/linq.reactions.test.ts`), then open a PR from `gemini` to `main`. Two files will conflict:
+**Merging (done into `gemini`, `7b1e166`).** `main` was merged into `gemini` and the conflicts were resolved as below. Typecheck is clean and all 220 tests pass (ours plus Linq's).
+
+A smoke test ran the real server against a fake local Linq API, with Gemini in mock mode:
+- A signed "approve the Figma request" webhook got the reply "Figma's request is $1,200. Approve it?"
+- A signed "yes" webhook got "Done — Figma's $1,200 request was approved."
+- An unsigned webhook was rejected with 401.
+
+**Remaining step:** open a PR from `gemini` to `main`. Conflicts that were resolved:
 
 | File | Resolution |
 |---|---|
@@ -109,11 +116,11 @@ The shared types in `src/types/index.ts` are **unchanged**. They were verified i
 
 ---
 
-## 3. Testing from a phone (after the Linq merge)
+## 3. Testing from a phone
 
 You text the Linq number and get the bot's replies in iMessage. What's needed:
 
-1. **Merge `main` into `gemini`** as described in §2.
+1. **Use branch `gemini`**, which already contains Linq (§2).
 2. **Fill in `.env`** with Person 1's values: `LINQ_API_KEY`, `LINQ_WEBHOOK_SECRET` and `LINQ_BASE_URL`. `LINQ_FROM_NUMBER` is only needed if the bot sends the first message.
 3. **Start the server:** `npm run dev`. It serves `POST /webhooks/linq` on `PORT` (default 3000).
 4. **Make it reachable from the internet:** open a tunnel (ngrok or cloudflared) to port 3000.
@@ -279,7 +286,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | P2 | `src/orchestration/mock.zip.ts`: 15 fake requests. **`req_9` (Notion) always fails on purpose** to demo partial failure. | Delete after P1, or keep only for tests |
 | P3 | `.env` has `GEMINI_MODE=mock` | Switch to `live` for the real demo |
 | P4 | `.env` has no Linq values yet | Before phone testing (§3) |
-| P5 | `main` still has Linq's placeholder `agent.ts` ("hello back") | Replaced when `gemini` is merged into `main` (L8) |
+| P5 | `main` still has Linq's placeholder `agent.ts` ("hello back"). `gemini` has the real one. | Replaced when the `gemini` → `main` PR is merged (L8) |
 
 ### Person 3 (me) before the demo
 | # | Item |
@@ -320,7 +327,7 @@ Expected: `{"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"
 | L5 | Reply length: bulk-review replies can be ~15 lines | Open: check it looks OK in iMessage |
 | L6 | **Where the webhook points:** only one server receives Linq webhooks. Agree whose machine or tunnel hosts the merged app for phone testing and the demo. | Open |
 | L7 | A 👍 on an old bot message could confirm the plan pending *now* | **Resolved** by Linq `753c1e3`: a 👍 only counts on the bot's latest reply. A 👎 on any bot message still cancels, which is safe. |
-| L8 | Merge `main` (which has Linq) into `gemini`, resolving `agent.ts` (keep ours) and `.env.example` (keep both); run all tests including Linq's; then PR `gemini` to `main`. See §2. | Open: not done yet |
+| L8 | Merge Linq with our layer | **Merged into `gemini`** (`7b1e166`): 220 tests pass and the smoke test works. **Still open:** PR `gemini` to `main`. |
 | L9 | Tapback words: we match Linq's current `yes`/`no`. If Linq changes them again, `TAPBACK_INTENTS` in `agent.ts` must change too. Otherwise tapbacks still work through Gemini, but cost an API call each. | Agreed words: keep in sync |
 
 ### Deferred by the spec (unchanged; revisit only if they become blockers)
