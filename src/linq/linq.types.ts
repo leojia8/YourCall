@@ -8,10 +8,25 @@ export interface LinqMessagePart {
   value?: string; // present on text parts
 }
 
+/**
+ * A part we send. A `link` part is delivered as a rich preview card and must be
+ * the ONLY part in its message (Linq rule), so every message we send has one part.
+ */
+export type LinqOutboundPart = { type: "text"; value: string } | { type: "link"; value: string };
+
 /** POST {base}/chats/{chatId}/messages */
 export interface LinqSendMessageRequest {
   message: {
-    parts: Array<{ type: "text"; value: string }>;
+    parts: LinqOutboundPart[];
+  };
+}
+
+/** POST {base}/chats — starts a new chat with an initial message. */
+export interface LinqCreateChatRequest {
+  from: string; // E.164 number we send from
+  to: string[]; // recipient handles (E.164 phone number or email)
+  message: {
+    parts: LinqOutboundPart[];
   };
 }
 

@@ -10,4 +10,6 @@ export const env = {
   LINQ_BASE_URL: process.env.LINQ_BASE_URL || "https://api.linqapp.com/api/partner/v3",
   // whsec_... returned ONCE when the webhook subscription is created.
   LINQ_WEBHOOK_SECRET: process.env.LINQ_WEBHOOK_SECRET ?? "",
+  // Our Linq number in E.164 (e.g. +16462049058). Only needed to message someone first.
+  LINQ_FROM_NUMBER: process.env.LINQ_FROM_NUMBER ?? "",
 };
