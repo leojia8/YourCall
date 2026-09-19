@@ -320,6 +320,44 @@ async function postTextMessage(conversationId: string, text: string): Promise<vo
   }
 }
 
+const TYPING_TIMEOUT_MS = 3_000; // cosmetic, so never hold up a reply for long
+
+async function callTyping(conversationId: string, method: "POST" | "DELETE"): Promise<void> {
+  if (conversationId.trim() === "") {
+    throw new Error("typing indicator requires a non-empty conversationId");
+  }
+  if (env.LINQ_API_KEY === "") {
+    throw new LinqConfigError("LINQ_API_KEY must be set in .env");
+  }
+
+  const baseUrl = env.LINQ_BASE_URL.replace(/\/+$/, "");
+  const res = await fetch(`${baseUrl}/chats/${encodeURIComponent(conversationId)}/typing`, {
+    method,
+    headers: { Authorization: `Bearer ${env.LINQ_API_KEY}` },
+    signal: AbortSignal.timeout(TYPING_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw await toApiError(res);
+  }
+  await res.body?.cancel();
+}
+
+/**
+ * Shows the "..." typing bubble in the chat (iMessage only, best-effort: Linq
+ * answers 204 even if it can't display it). It lasts ~85s and is cleared
+ * automatically when a message is sent into the chat.
+ *
+ * Throws LinqConfigError if LINQ_API_KEY is unset, LinqApiError on a non-2xx.
+ */
+export async function startTyping(conversationId: string): Promise<void> {
+  await callTyping(conversationId, "POST");
+}
+
+/** Clears the typing bubble without sending a message. Same errors as startTyping. */
+export async function stopTyping(conversationId: string): Promise<void> {
+  await callTyping(conversationId, "DELETE");
+}
+
 /**
  * Sends `text` into the given Linq chat (conversationId is the chat id from
  * the inbound webhook). This is the only function the rest of the app should

@@ -11,6 +11,8 @@ vi.mock("../src/linq/linq.service", async (importOriginal) => ({
   isDuplicateWebhook: vi.fn(),
   normalizeLinqWebhook: vi.fn(),
   sendMessage: vi.fn(),
+  startTyping: vi.fn(),
+  stopTyping: vi.fn(),
 }));
 
 import { linqRouter } from "../src/linq/linq.routes";
@@ -22,6 +24,8 @@ import {
   MalformedLinqWebhookError,
   normalizeLinqWebhook,
   sendMessage,
+  startTyping,
+  stopTyping,
   verifyLinqSignature,
 } from "../src/linq/linq.service";
 import { handleMessage } from "../src/orchestration/agent";
@@ -169,5 +173,85 @@ describe("POST /webhooks/linq", () => {
     expect((await post("{}")).status).toBe(200);
     await vi.waitFor(() => expect(console.error).toHaveBeenCalled());
     expect((await post("{}")).status).toBe(200); // server still up and serving
+  });
+});
+
+describe("typing indicator", () => {
+  it("shows typing while orchestration works, then just sends (sending clears it)", async () => {
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    let finish!: (reply: string) => void;
+    vi.mocked(handleMessage).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+
+    await post("{}");
+
+    await vi.waitFor(() => expect(startTyping).toHaveBeenCalledWith("conv_abc123"));
+    expect(sendMessage).not.toHaveBeenCalled(); // still "thinking"
+
+    finish("done");
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith("conv_abc123", "done"));
+    expect(stopTyping).not.toHaveBeenCalled();
+  });
+
+  it("does not send the reply until the typing request has settled", async () => {
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    vi.mocked(handleMessage).mockResolvedValue("hi");
+    let settleTyping!: () => void;
+    vi.mocked(startTyping).mockReturnValue(new Promise<void>((resolve) => (settleTyping = resolve)));
+
+    await post("{}");
+    await vi.waitFor(() => expect(handleMessage).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sendMessage).not.toHaveBeenCalled(); // a late "start" must not land after the reply
+
+    settleTyping();
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith("conv_abc123", "hi"));
+  });
+
+  it("still replies when the typing indicator fails", async () => {
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    vi.mocked(handleMessage).mockResolvedValue("hi");
+    vi.mocked(startTyping).mockRejectedValue(new Error("typing down"));
+
+    expect((await post("{}")).status).toBe(200);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith("conv_abc123", "hi"));
+    expect(console.warn).toHaveBeenCalled();
+  });
+
+  it("clears typing when there is no reply to send", async () => {
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    vi.mocked(handleMessage).mockResolvedValue("   ");
+
+    await post("{}");
+
+    await vi.waitFor(() => expect(stopTyping).toHaveBeenCalledWith("conv_abc123"));
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("clears typing when sending the reply fails", async () => {
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    vi.mocked(handleMessage).mockResolvedValue("hi");
+    vi.mocked(sendMessage).mockRejectedValue(new Error("linq down"));
+
+    await post("{}");
+
+    await vi.waitFor(() => expect(stopTyping).toHaveBeenCalledWith("conv_abc123"));
+  });
+
+  it("never shows typing for events that get no reply (ignored, duplicate, invalid)", async () => {
+    vi.mocked(normalizeLinqWebhook).mockImplementation(() => {
+      throw new IgnoredLinqEventError("receipt");
+    });
+    await post("{}");
+
+    vi.mocked(normalizeLinqWebhook).mockReturnValue(message);
+    vi.mocked(isDuplicateWebhook).mockReturnValue(true);
+    await post("{}");
+
+    vi.mocked(verifyLinqSignature).mockImplementation(() => {
+      throw new LinqSignatureError("bad");
+    });
+    await post("{}");
+
+    expect(startTyping).not.toHaveBeenCalled();
   });
 });
