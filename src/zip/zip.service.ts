@@ -37,8 +37,12 @@ export async function getPendingRequests(): Promise<PurchaseRequest[]> {
   const data = (await response.json()) as ZipRequestListResponse;
 
   return data.list
-    .filter((request) => request.request_type === "PURCHASE_REQUEST")
-    .map(mapZipRequest);
+  .filter(
+    (request) =>
+      request.request_type === "PURCHASE_REQUEST" &&
+      request.status === 1
+  )
+  .map(mapZipRequest);
 }
 
 export async function getRequestById(

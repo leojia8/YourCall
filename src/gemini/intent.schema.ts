@@ -54,7 +54,7 @@ const INTENT_SCHEMA: GeminiSchema = {
       type: "ARRAY",
       nullable: true,
       items: { type: "STRING" },
-      description: `Categories the message says not to touch / to exclude, e.g. "don't touch AI" -> ["AI"]. ${IF_UNSTATED}`,
+      description: `Categories or vendor-type terms the message says not to touch / to exclude, e.g. "don't touch AI vendors" -> ["AI"]. ${IF_UNSTATED}`,
     },
     includedCategories: {
       type: "ARRAY",
@@ -106,7 +106,7 @@ Never use placeholder strings like "none" or "N/A".
 Fields:
 - maxAmount: number. Upper spending limit, e.g. "under 5k" or "under five grand" -> 5000.
 - existingVendorsOnly: boolean. true for "vendors we already use", "existing vendors".
-- excludedCategories: string[]. Categories the user says not to touch.
+- excludedCategories: string[]. Categories or vendor-type terms the user says not to touch.
 - includedCategories: string[]. Categories the user limits the review to.
 - vendor: string. The vendor the user names.
 - requestId: string. A request ID the user types explicitly. Never invent one.
@@ -117,7 +117,7 @@ ${hints.join("\n")}
 
 Examples:
 "show me what I have pending" -> {"intent":"GET_PENDING","maxAmount":null,"existingVendorsOnly":null,"excludedCategories":null,"includedCategories":null,"vendor":null,"requestId":null}
-"handle everything under five grand from vendors we already use but don't touch AI" -> {"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":true,"excludedCategories":["AI"],"includedCategories":null,"vendor":null,"requestId":null}
+"handle everything under five grand but don't touch AI vendors" -> {"intent":"BULK_REVIEW","maxAmount":5000,"existingVendorsOnly":null,"excludedCategories":["AI"],"includedCategories":null,"vendor":null,"requestId":null}
 "approve the Figma request" -> {"intent":"APPROVE","maxAmount":null,"existingVendorsOnly":null,"excludedCategories":null,"includedCategories":null,"vendor":"Figma","requestId":null}
 "deny the Datadog request" -> {"intent":"DENY","maxAmount":null,"existingVendorsOnly":null,"excludedCategories":null,"includedCategories":null,"vendor":"Datadog","requestId":null}
 "why did you flag OpenAI?" -> {"intent":"INVESTIGATE","maxAmount":null,"existingVendorsOnly":null,"excludedCategories":null,"includedCategories":null,"vendor":"OpenAI","requestId":null}

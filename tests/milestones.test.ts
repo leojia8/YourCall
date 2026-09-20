@@ -2,6 +2,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/gemini/intent.parser", () => ({ parseIntent: vi.fn() }));
+// zip.client points at the real Zip service; these milestones need the in-memory mock.
+vi.mock("../src/orchestration/zip.client", () => vi.importActual("../src/orchestration/mock.zip"));
 
 import { parseIntent } from "../src/gemini/intent.parser";
 import { handleMessage } from "../src/orchestration/agent";

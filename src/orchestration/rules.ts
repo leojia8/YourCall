@@ -55,8 +55,23 @@ export function evaluateRequest(request: PurchaseRequest, intent: UserIntent): R
     if (!category) {
       return fail(request, "MISSING_DATA", `${vendor} has no category, so I can't check it against your category rules.`);
     }
-    if (categoryIn(category, excluded)) {
-      return fail(request, "EXCLUDED_CATEGORY", `${vendor} is in ${category}, which you excluded.`);
+    const excludedByCategory = categoryIn(category, excluded);
+    const excludedByVendor = excluded.some((term) =>
+      normalizeName(vendor).includes(normalizeName(term))
+    );
+
+    if (excludedByCategory || excludedByVendor) {
+      const matched = excluded.find(
+        (term) =>
+          normalizeName(category) === normalizeName(term) ||
+          normalizeName(vendor).includes(normalizeName(term))
+      );
+
+      return fail(
+        request,
+        "EXCLUDED_CATEGORY",
+        `${vendor} matches your "${matched}" exclusion.`
+      );
     }
     if (included.length > 0 && !categoryIn(category, included)) {
       return fail(request, "EXCLUDED_CATEGORY", `${vendor} is in ${category}, outside the categories you asked for.`);

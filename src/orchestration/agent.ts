@@ -1,4 +1,6 @@
 import { parseIntent } from "../gemini/intent.parser";
+import { investigateZipRequest } from "../mcp/investigator";
+import { explainZipInvestigation } from "../mcp/investigation.explainer";
 import type { IntentContext } from "../gemini/gemini.types";
 import type {
   ActionPlan,
@@ -36,10 +38,10 @@ const EXAMPLES = [
   '• "show me my pending purchases"',
   '• "handle everything under 5k from existing vendors, but don\'t touch AI"',
   '• "why did you flag OpenAI?"',
-  '• "approve the Figma request"',
+  '• "authorize the Figma request"',
 ].join("\n");
 const GREETING_TEXT = `Hi! I'm your procurement assistant. I can review and act on purchase requests for you. Try:\n${EXAMPLES}`;
-const HELP_EXAMPLES_TEXT = `Here's what I can do. Try:\n${EXAMPLES}\n\nI never approve or deny anything until you reply "yes".`;
+const HELP_EXAMPLES_TEXT = `Here's what I can do. Try:\n${EXAMPLES}\n\nI never authorize or deny anything until you reply "yes".`;
 const THANKS_TEXT = "You're welcome!";
 const ZIP_READ_FAILED =
   "I couldn't load your purchase requests from Zip right now, so I didn't change anything. Please try again in a moment.";
@@ -128,7 +130,9 @@ async function route({ conversationId, text, audio }: IncomingMessage): Promise<
     return `🎤 "${heard.transcript}"\n\n${reply}`;
   }
 
-  return dispatch(conversationId, await parseIntent(text, hints), prefetched);
+  const parsedIntent = await parseIntent(text, hints);
+
+  return dispatch(conversationId, parsedIntent, prefetched);
 }
 
 async function dispatch(
@@ -257,19 +261,55 @@ async function handleInvestigate(
         `${describeRequest(request)} (${request.id}) isn't pending. Its status is "${request.status}".`
       );
     }
-    return withPendingNote(conversationId, explainRequests([request], pending ?? [request], record));
+    try {
+      await investigateZipRequest(request.id);
+    } catch (error) {
+      console.error("[agent] MCP investigation failed:", error);
+    }
+
+    return withPendingNote(
+      conversationId,
+      explainRequests([request], pending ?? [request], record)
+    );
   }
 
   if (intent.vendor) {
     if (!pending) return withPendingNote(conversationId, ZIP_READ_FAILED);
+
     const matches = findVendorMatches(pending, intent.vendor);
+
     if (matches.length === 0) {
       return withPendingNote(
         conversationId,
         `I don't see any pending requests from ${intent.vendor}, so nothing is flagged for them right now.`
       );
     }
-    return withPendingNote(conversationId, explainRequests(matches, pending, record));
+
+    // If this vendor has exactly one matching request, use Zip MCP
+    // to investigate its richer request and approval context.
+    if (matches.length === 1) {
+      const request = matches[0]!;
+
+      try {
+        const investigation = await investigateZipRequest(request.id);
+
+        const explanation = await explainZipInvestigation(
+          request,
+          investigation
+        );
+
+        return withPendingNote(conversationId, explanation);
+      } catch (error) {
+        console.error("[agent] MCP investigation failed:", error);
+      }
+    }
+
+    // Fall back to the existing deterministic explanation if MCP/Gemini
+    // fails or if multiple requests match the vendor.
+    return withPendingNote(
+      conversationId,
+      explainRequests(matches, pending, record)
+    );
   }
 
   if (record && record.plan.attentionItems.length > 0) {
@@ -316,7 +356,16 @@ function explainRequests(
 
   const planned = record?.plan.proposedActions.filter((action) => ids.has(action.requestId)) ?? [];
   if (planned.length > 0) {
-    reasons.push(`Your pending plan would ${VERBS[planned[0]!.type].base} ${planned.length === 1 ? "it" : `${planned.length} of them`}.`);
+    const plannedVerb =
+      planned[0]!.type === "APPROVE"
+        ? "record your authorization for"
+        : VERBS[planned[0]!.type].base;
+
+    reasons.push(
+      `Your pending plan would ${plannedVerb} ${
+        planned.length === 1 ? "it" : `${planned.length} of them`
+      }.`
+    );
   }
 
   if (reasons.length === 0) reasons.push("Nothing about it is flagged in the current data.");
@@ -379,8 +428,8 @@ function handleBulkReview(conversationId: string, intent: UserIntent, pending: P
   lines.push(
     "",
     actionCount === 1
-      ? "Want me to approve it? Reply yes to confirm or cancel to stop."
-      : `Want me to approve these ${actionCount}? Reply yes to confirm or cancel to stop.`
+      ? "Want me to record your authorization for it? Reply yes to confirm or cancel to stop."
+      : `Want me to record your authorization for these ${actionCount} requests? Reply yes to confirm or cancel to stop.`
   );
   if (replacing) lines.push("(This replaces your earlier plan.)");
   return lines.join("\n");
@@ -445,7 +494,15 @@ function handleSingleAction(
   const replacing = getPendingPlan(conversationId) !== undefined;
   savePendingPlan(conversationId, plan, [target]);
 
-  const lines = [`${target.vendor.name.trim()}'s request is ${formatRequestAmount(target)}. ${capitalize(verb.base)} it?`];
+  const actionPrompt =
+  type === "APPROVE"
+    ? "Record your authorization for it?"
+    : `${capitalize(verb.base)} it?`;
+
+  const lines = [
+    `${target.vendor.name.trim()}'s request is ${formatRequestAmount(target)}. ${actionPrompt}`,
+  ];
+
   if (headsUp.length > 0) lines.push(`Heads up: ${headsUp.map((item) => item.reason).join(" ")}`);
   if (replacing) lines.push("(This replaces your earlier plan.)");
   return lines.join("\n");
@@ -501,10 +558,29 @@ function summarizeResults(results: ActionResult[], snapshot: Map<string, Purchas
       const ofType = succeeded.filter((result) => result.action === type);
       if (ofType.length === 0) continue;
       if (ofType.length === 1) {
-        parts.push(`${describeRef(ofType[0]!.requestId, snapshot)} was ${VERBS[type].past}`);
+        if (type === "APPROVE") {
+          parts.push(
+            `your authorization for ${describeRef(ofType[0]!.requestId, snapshot)} was recorded in Zip`
+          );
+        } else {
+          parts.push(
+            `${describeRef(ofType[0]!.requestId, snapshot)} was ${VERBS[type].past}`
+          );
+        }
       } else {
-        const names = ofType.map((result) => describeShortRef(result.requestId, snapshot)).join(", ");
-        parts.push(`${ofType.length} requests were ${VERBS[type].past}: ${names}`);
+        const names = ofType
+          .map((result) => describeShortRef(result.requestId, snapshot))
+          .join(", ");
+
+        if (type === "APPROVE") {
+          parts.push(
+            `your authorization for ${ofType.length} requests was recorded in Zip: ${names}`
+          );
+        } else {
+          parts.push(
+            `${ofType.length} requests were ${VERBS[type].past}: ${names}`
+          );
+        }
       }
     }
     lines.push(`Done — ${parts.join("; ")}.`);
@@ -538,8 +614,8 @@ function describePlan(record: PendingPlanRecord): string {
     if (ofType.length === 0) continue;
     parts.push(
       ofType.length === 1
-        ? `${VERBS[type].base} ${describeRef(ofType[0]!.requestId, record.requests)}`
-        : `${VERBS[type].base} ${ofType.length} requests`
+        ? `${type === "APPROVE" ? "authorize" : VERBS[type].base} ${describeRef(ofType[0]!.requestId, record.requests)}`
+        : `${type === "APPROVE" ? "authorize" : VERBS[type].base} ${ofType.length} requests`
     );
   }
   return parts.join(" and ");
