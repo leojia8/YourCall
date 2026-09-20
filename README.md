@@ -109,7 +109,7 @@ Tests never call the real Gemini or Zip APIs.
 ## Status
 
 - **Working end to end over iMessage:** Linq integration, Gemini intent parsing, rules, spend detection and the confirmation flow.
-- **Zip integration is in progress.** Until it's connected, the assistant runs on built-in sample purchase requests (`src/orchestration/mock.zip.ts`). Swapping in the real service is a one-line change in `src/orchestration/zip.client.ts`.
+- **Zip is connected:** confirmed approvals and denials are written back to Zip, and open-ended questions ("why does this need me?") are answered through Zip's MCP interface in read-only mode.
 
 ## Team
 
